@@ -1,0 +1,27 @@
+# ── Secrets ───────────────────────────────────────────────────
+.env
+
+# ── Generated output ──────────────────────────────────────────
+#output/
+#src/
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# ── Test / tooling ────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Claude Code local settings ────────────────────────────────
+.claude/
+
+# ── OS artefacts ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db

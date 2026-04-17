@@ -1,0 +1,164 @@
+{
+  "name": "Diabetes Prediction Pipeline",
+  "properties": {
+    "description": "Trains a machine learning model on diabetes patient data, registers it, and generates predictions on a test dataset.",
+    "parameters": {
+      "ModelVersion": {
+        "type": "int",
+        "defaultValue": 1
+      },
+      "TestTableName": {
+        "type": "string",
+        "defaultValue": "diabetes_test"
+      },
+      "RetrainModel": {
+        "type": "bool",
+        "defaultValue": true
+      }
+    },
+    "activities": [
+      {
+        "name": "Check if Retraining Required",
+        "type": "IfCondition",
+        "description": "Decides whether to retrain the model based on the RetrainModel parameter.",
+        "dependsOn": [],
+        "typeProperties": {
+          "expression": {
+            "value": "@equals(pipeline().parameters.RetrainModel, true)",
+            "type": "Expression"
+          },
+          "ifTrueActivities": [
+            {
+              "name": "Train Model",
+              "type": "TridentNotebook",
+              "typeProperties": {
+                "notebookId": "Generate-Predictions",
+                "workspaceId": "workspace-001"
+              }
+            }
+          ],
+          "ifFalseActivities": []
+        }
+      },
+      {
+        "name": "Validate Test Data",
+        "type": "Lookup",
+        "description": "Checks that the test dataset exists and has records before running predictions.",
+        "dependsOn": [
+          {
+            "activity": "Check if Retraining Required",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "source": {
+            "type": "LakehouseTableSource",
+            "query": "SELECT COUNT(*) as record_count FROM diabetes_test"
+          },
+          "dataset": {
+            "referenceName": "LakehouseDataset",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": true
+        }
+      },
+      {
+        "name": "Check Record Count",
+        "type": "IfCondition",
+        "description": "Fails the pipeline if no records are found in the test dataset.",
+        "dependsOn": [
+          {
+            "activity": "Validate Test Data",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "expression": {
+            "value": "@greater(activity('Validate Test Data').output.firstRow.record_count, 0)",
+            "type": "Expression"
+          },
+          "ifTrueActivities": [],
+          "ifFalseActivities": [
+            {
+              "name": "Raise Empty Dataset Error",
+              "type": "Fail",
+              "typeProperties": {
+                "message": "Test dataset is empty. Cannot generate predictions.",
+                "errorCode": "NO_DATA"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Generate Predictions",
+        "type": "TridentNotebook",
+        "description": "Runs the trained diabetes model against the test dataset and saves the results.",
+        "dependsOn": [
+          {
+            "activity": "Check Record Count",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "notebookId": "Generate-Predictions",
+          "workspaceId": "workspace-001",
+          "parameters": {
+            "table_name": {
+              "value": "@pipeline().parameters.TestTableName",
+              "type": "string"
+            },
+            "model_version": {
+              "value": "@pipeline().parameters.ModelVersion",
+              "type": "int"
+            }
+          }
+        }
+      },
+      {
+        "name": "Copy Predictions to Reporting",
+        "type": "Copy",
+        "description": "Copies the prediction results to the reporting storage area for downstream consumption.",
+        "dependsOn": [
+          {
+            "activity": "Generate Predictions",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "source": {
+            "type": "LakehouseTableSource",
+            "tableName": "diabetes_test"
+          },
+          "sink": {
+            "type": "LakehouseTableSink",
+            "tableName": "diabetes_predictions_report",
+            "tableActionOption": "OverwriteSchema"
+          },
+          "enableStaging": false
+        }
+      },
+      {
+        "name": "Notify on Failure",
+        "type": "Web",
+        "description": "Sends an alert notification if the pipeline fails at any point.",
+        "dependsOn": [
+          {
+            "activity": "Copy Predictions to Reporting",
+            "dependencyConditions": ["Failed"]
+          }
+        ],
+        "typeProperties": {
+          "url": "https://alerts.internal/api/notify",
+          "method": "POST",
+          "body": {
+            "pipeline": "Diabetes Prediction Pipeline",
+            "status": "FAILED",
+            "timestamp": "@utcnow()"
+          }
+        }
+      }
+    ],
+    "annotations": []
+  }
+}

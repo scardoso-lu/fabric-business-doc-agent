@@ -1,0 +1,166 @@
+{
+  "name": "EU Population Data Ingestion",
+  "properties": {
+    "description": "Ingests projected EU population data from Eurostat, applies business transformations, and loads the clean dataset into the reporting lakehouse.",
+    "parameters": {
+      "SourceRegions": {
+        "type": "array",
+        "defaultValue": ["BE", "DE", "FR", "NL", "IT", "ES"]
+      },
+      "ProjectionScenario": {
+        "type": "string",
+        "defaultValue": "BSL"
+      },
+      "TargetTable": {
+        "type": "string",
+        "defaultValue": "Population"
+      }
+    },
+    "activities": [
+      {
+        "name": "Download Eurostat File",
+        "type": "Copy",
+        "description": "Downloads the latest population projection file from the Eurostat public data portal.",
+        "dependsOn": [],
+        "typeProperties": {
+          "source": {
+            "type": "HttpSource",
+            "requestMethod": "GET",
+            "httpRequestTimeout": "00:01:40"
+          },
+          "sink": {
+            "type": "LakehouseFileSink",
+            "rootPath": "Files/temp",
+            "fileName": "proj_23np.tsv"
+          }
+        }
+      },
+      {
+        "name": "Validate Downloaded File",
+        "type": "GetMetadata",
+        "description": "Checks that the downloaded file is not empty before processing.",
+        "dependsOn": [
+          {
+            "activity": "Download Eurostat File",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "EurostatTSV",
+            "type": "DatasetReference"
+          },
+          "fieldList": ["size", "exists"]
+        }
+      },
+      {
+        "name": "Check File Not Empty",
+        "type": "IfCondition",
+        "description": "Stops the pipeline if the downloaded file has no data.",
+        "dependsOn": [
+          {
+            "activity": "Validate Downloaded File",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "expression": {
+            "value": "@greater(activity('Validate Downloaded File').output.size, 0)",
+            "type": "Expression"
+          },
+          "ifFalseActivities": [
+            {
+              "name": "Fail Empty File",
+              "type": "Fail",
+              "typeProperties": {
+                "message": "Eurostat source file is empty or could not be downloaded.",
+                "errorCode": "EMPTY_SOURCE"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Transform and Load Population Data",
+        "type": "TridentNotebook",
+        "description": "Parses and transforms the raw Eurostat file, applies country and scenario filters, and loads clean data into the Population table.",
+        "dependsOn": [
+          {
+            "activity": "Check File Not Empty",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "notebookId": "eurostat-notebook",
+          "workspaceId": "workspace-002",
+          "parameters": {
+            "target_table": {
+              "value": "@pipeline().parameters.TargetTable",
+              "type": "string"
+            },
+            "projection_scenario": {
+              "value": "@pipeline().parameters.ProjectionScenario",
+              "type": "string"
+            },
+            "regions": {
+              "value": "@pipeline().parameters.SourceRegions",
+              "type": "array"
+            }
+          }
+        }
+      },
+      {
+        "name": "Process Each Region",
+        "type": "ForEach",
+        "description": "Runs post-load validation for each target region individually.",
+        "dependsOn": [
+          {
+            "activity": "Transform and Load Population Data",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "items": {
+            "value": "@pipeline().parameters.SourceRegions",
+            "type": "Expression"
+          },
+          "isSequential": false,
+          "activities": [
+            {
+              "name": "Validate Region Record Count",
+              "type": "Lookup",
+              "typeProperties": {
+                "source": {
+                  "type": "LakehouseTableSource",
+                  "query": "SELECT COUNT(*) as cnt FROM Population WHERE geo = '@{item()}'"
+                },
+                "firstRowOnly": true
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Cleanup Temp Files",
+        "type": "Delete",
+        "description": "Removes the temporary raw files downloaded during ingestion.",
+        "dependsOn": [
+          {
+            "activity": "Process Each Region",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "TempFilesDataset",
+            "type": "DatasetReference"
+          },
+          "logStorageSettings": null,
+          "enableLogging": false,
+          "recursive": true
+        }
+      }
+    ],
+    "annotations": []
+  }
+}

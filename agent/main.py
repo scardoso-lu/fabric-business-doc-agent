@@ -1,0 +1,320 @@
+"""
+Fabric Business Documentation Agent — CLI
+
+Usage examples:
+
+  # Document all pipelines and notebooks found under ./src
+  python -m agent.main --src ./src
+
+  # Document a specific directory
+  python -m agent.main --src ./src/mslearn-fabric --output ./docs
+
+  # Document only notebooks (skip pipeline JSONs)
+  python -m agent.main --src ./src --notebooks-only
+
+  # Document only pipeline JSONs
+  python -m agent.main --src ./src --pipelines-only
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import click
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+
+from agent.ai.client_factory import create_client
+from agent.config import CONTEXT_FILE, CONTEXT_TEXT, GITHUB_REPO_URL, OUTPUT_DIR, PUBLISH_WIKI, SRC_DIR
+from agent.git_cloner import clone_repo
+from agent.rag.indexer import DocGroup, build_keyword_index, build_vector_index
+from agent.rag.retriever import RAGRetriever
+from agent.generators.doc_generator import (
+    generate_notebook_doc,
+    generate_pipeline_doc,
+    get_linked_notebooks,
+)
+from agent.parsers.notebook_parser import ParsedNotebook, find_notebook_files, parse_notebook_file
+from agent.parsers.pipeline_parser import find_pipeline_files, parse_pipeline_file
+from agent.publishers.base_wiki_publisher import BaseWikiPublisher
+from agent.publishers.wiki_factory import create_wiki_publisher
+
+console = Console()
+
+
+@click.command()
+@click.option(
+    "--src",
+    "src_dir",
+    default=None,
+    show_default=True,
+    help="Root directory to scan for pipeline JSON and notebook files.",
+    type=click.Path(file_okay=False, path_type=Path),
+)
+@click.option(
+    "--output",
+    "output_dir",
+    default=str(OUTPUT_DIR),
+    show_default=True,
+    help="Directory where generated .md files are written.",
+    type=click.Path(file_okay=False, path_type=Path),
+)
+@click.option("--pipelines-only", is_flag=True, default=False, help="Only process pipeline JSON files.")
+@click.option("--notebooks-only", is_flag=True, default=False, help="Only process notebook .ipynb files.")
+@click.option(
+    "--pipeline",
+    "pipeline_filter",
+    default=None,
+    help="Process only the pipeline whose file stem matches this value.",
+)
+@click.option(
+    "--notebook",
+    "notebook_filter",
+    default=None,
+    help="Process only the notebook whose file stem matches this value.",
+)
+def main(
+    src_dir: Path,
+    output_dir: Path,
+    pipelines_only: bool,
+    notebooks_only: bool,
+    pipeline_filter: str | None,
+    notebook_filter: str | None,
+) -> None:
+    console.print(Panel.fit("[bold cyan]Fabric Business Documentation Agent[/bold cyan]"))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for f in output_dir.glob("*.md"):
+        f.unlink()
+
+    # ------------------------------------------------------------------
+    # Context file (optional — enriches system prompt with org/project info)
+    # ------------------------------------------------------------------
+    if CONTEXT_FILE and not CONTEXT_TEXT:
+        console.print(f"[bold yellow]Warning:[/bold yellow] CONTEXT_FILE is set to '{CONTEXT_FILE}' but the file could not be read. Context will not be applied.\n")
+    elif CONTEXT_TEXT:
+        console.print(f"[dim]Context loaded from [italic]{CONTEXT_FILE}[/italic] ({len(CONTEXT_TEXT)} chars)[/dim]\n")
+
+    # ------------------------------------------------------------------
+    # Clone repository (if GITHUB_REPO_URL is set)
+    # ------------------------------------------------------------------
+    clone_dir = SRC_DIR
+    if GITHUB_REPO_URL:
+        console.print(f"Cloning [bold]{GITHUB_REPO_URL}[/bold] …")
+        try:
+            clone_repo(GITHUB_REPO_URL, clone_dir)
+            console.print(f"  [green]✓[/green] Cloned to [italic]{clone_dir}[/italic]\n")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[bold red]Error:[/bold red] Failed to clone repository: {exc}")
+            sys.exit(1)
+        if src_dir is None:
+            src_dir = clone_dir
+    elif src_dir is None:
+        src_dir = SRC_DIR
+
+    if not src_dir.exists():
+        console.print(f"[bold red]Error:[/bold red] Source directory not found: {src_dir}")
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # Discover source files
+    # ------------------------------------------------------------------
+    notebook_files = [] if pipelines_only else find_notebook_files(src_dir)
+    pipeline_files = [] if notebooks_only else find_pipeline_files(src_dir)
+
+    if notebook_filter:
+        notebook_files = [f for f in notebook_files if f.stem == notebook_filter]
+    if pipeline_filter:
+        pipeline_files = [f for f in pipeline_files if f.stem == pipeline_filter]
+
+    console.print(
+        f"Found [bold]{len(pipeline_files)}[/bold] pipeline(s) and "
+        f"[bold]{len(notebook_files)}[/bold] notebook(s) under [italic]{src_dir}[/italic]"
+    )
+
+    if not pipeline_files and not notebook_files:
+        console.print("[yellow]Nothing to process. Exiting.[/yellow]")
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # Parse all notebooks upfront (needed for pipeline linking)
+    # ------------------------------------------------------------------
+    notebook_map: dict[str, ParsedNotebook] = {}
+    for nb_path in notebook_files:
+        nb = parse_notebook_file(nb_path)
+        if nb:
+            notebook_map[nb.name] = nb
+
+    # ------------------------------------------------------------------
+    # Parse all pipelines upfront and identify linked notebooks
+    # Linked notebooks are documented as tasks inside their pipeline's doc
+    # and do NOT get a standalone .md file.
+    # ------------------------------------------------------------------
+    parsed_pipelines = []
+    # maps notebook name → pipeline name(s) it belongs to
+    linked_notebooks: dict[str, str] = {}
+
+    for pf in pipeline_files:
+        pipeline = parse_pipeline_file(pf)
+        if not pipeline:
+            continue
+        parsed_pipelines.append(pipeline)
+        for nb_name in get_linked_notebooks(pipeline, notebook_map):
+            linked_notebooks[nb_name] = pipeline.name
+
+    orphan_notebooks = {
+        name: nb for name, nb in notebook_map.items()
+        if name not in linked_notebooks
+    }
+
+    console.print(
+        f"  {len(parsed_pipelines)} pipeline(s) · "
+        f"{len(linked_notebooks)} linked notebook(s) · "
+        f"{len(orphan_notebooks)} orphan notebook(s)\n"
+    )
+
+    # ------------------------------------------------------------------
+    # Initialise LLM client
+    # ------------------------------------------------------------------
+    try:
+        client = create_client()
+    except ValueError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        sys.exit(1)
+
+    console.print(f"Using [bold]{client.provider}[/bold] / [bold]{client.model}[/bold]\n")
+
+    # ------------------------------------------------------------------
+    # Build RAG index (skipped for providers that don't use retrieval)
+    # ------------------------------------------------------------------
+    if client.supports_rag:
+        doc_groups: list[DocGroup] = []
+        for pipeline in parsed_pipelines:
+            linked_nbs = [
+                notebook_map[name]
+                for name in get_linked_notebooks(pipeline, notebook_map)
+                if name in notebook_map
+            ]
+            doc_groups.append(DocGroup(group_id=pipeline.name, pipeline=pipeline, notebooks=linked_nbs))
+        for nb_name, nb in orphan_notebooks.items():
+            doc_groups.append(DocGroup(group_id=nb_name, pipeline=None, notebooks=[nb]))
+
+        console.print("[bold]Building RAG index…[/bold]")
+
+        keyword_index = build_keyword_index(doc_groups)
+
+        qdrant_client = None
+        if client.embedding_model:
+            try:
+                qdrant_client = build_vector_index(doc_groups, client)
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"  [yellow]Vector index failed ({exc}) — using keyword index.[/yellow]")
+
+        retriever = RAGRetriever(keyword_index, qdrant=qdrant_client, llm_client=client)
+        mode = "vector + keyword fallback" if qdrant_client else "keyword"
+        console.print(f"  [green]✓[/green] Indexed [bold]{len(doc_groups)}[/bold] group(s) — [{mode}]\n")
+
+        client.set_retriever(retriever)
+    else:
+        console.print("[dim]RAG skipped — local Claude agent handles full context directly.[/dim]\n")
+
+    # ------------------------------------------------------------------
+    # Initialise wiki publisher (optional)
+    # ------------------------------------------------------------------
+    wiki: BaseWikiPublisher | None = None
+    if PUBLISH_WIKI:
+        try:
+            wiki = create_wiki_publisher()
+            console.print("[bold]Wiki publishing enabled.[/bold]\n")
+        except ValueError as exc:
+            console.print(f"[bold red]Error:[/bold red] {exc}")
+            sys.exit(1)
+
+    errors: list[str] = []
+
+    # ------------------------------------------------------------------
+    # Process pipelines (linked notebooks are embedded as tasks)
+    # ------------------------------------------------------------------
+    if parsed_pipelines:
+        console.print("[bold]Generating pipeline documentation…[/bold]")
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Processing…", total=len(parsed_pipelines))
+            for pipeline in parsed_pipelines:
+                progress.update(task, description=f"Pipeline: [cyan]{pipeline.name}[/cyan]")
+                try:
+                    if wiki and wiki.page_exists(pipeline.name):
+                        console.print(f"  [dim]⏭  {pipeline.name} — wiki page exists, skipping.[/dim]")
+                        continue
+                    markdown = generate_pipeline_doc(pipeline, notebook_map, client)
+                    out_path = output_dir / f"{pipeline.name}.md"
+                    out_path.write_text(markdown, encoding="utf-8")
+                    msg = f"  [green]✓[/green] {out_path.name}"
+                    if wiki:
+                        url = wiki.publish(pipeline.name, markdown)
+                        msg += f" → [dim]{url}[/dim]"
+                    console.print(msg)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"Error generating docs for pipeline {pipeline.name}: {exc}")
+                finally:
+                    progress.advance(task)
+
+    # ------------------------------------------------------------------
+    # Process orphan notebooks (not linked to any pipeline)
+    # ------------------------------------------------------------------
+    if orphan_notebooks:
+        console.print("\n[bold]Generating orphan notebook documentation…[/bold]")
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Processing…", total=len(orphan_notebooks))
+            for nb_name, notebook in orphan_notebooks.items():
+                progress.update(task, description=f"Notebook: [cyan]{nb_name}[/cyan]")
+                try:
+                    if wiki and wiki.page_exists(nb_name):
+                        console.print(f"  [dim]⏭  {nb_name} — wiki page exists, skipping.[/dim]")
+                        continue
+                    markdown = generate_notebook_doc(notebook, client)
+                    out_path = output_dir / f"{nb_name}.md"
+                    out_path.write_text(markdown, encoding="utf-8")
+                    msg = f"  [green]✓[/green] {out_path.name}"
+                    if wiki:
+                        url = wiki.publish(nb_name, markdown)
+                        msg += f" → [dim]{url}[/dim]"
+                    console.print(msg)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"Error generating docs for notebook {nb_name}: {exc}")
+                finally:
+                    progress.advance(task)
+
+    if linked_notebooks and not orphan_notebooks:
+        console.print(
+            "\n[dim]All notebooks are linked to pipelines — "
+            "no standalone notebook docs generated.[/dim]"
+        )
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
+    console.print()
+    if errors:
+        console.print(f"[bold yellow]Completed with {len(errors)} error(s):[/bold yellow]")
+        for e in errors:
+            console.print(f"  [red]✗[/red] {e}")
+    else:
+        console.print("[bold green]All documentation generated successfully.[/bold green]")
+
+    console.print(f"\nOutput written to: [italic]{output_dir}[/italic]")
+
+
+if __name__ == "__main__":
+    main()
