@@ -133,13 +133,22 @@ Both backends are optional and independent — configure one, both, or neither.
 
 ## Prompt customisation
 
-Every section prompt lives in `prompts.md` at the project root. Edit any `## section_key` block and the next run picks up your version. Sections absent from the file keep their built-in defaults.
+Each section prompt lives in its own file inside the `prompts/` folder. Edit the file for the section you want to change and the next run picks it up — no code changes required. Files absent from the folder fall back to built-in defaults, so partial customisation is safe.
 
-Within a section you can split the prompt into multiple **sub-prompts** by placing a `---` line between them. The agent makes one LLM call per sub-prompt and joins the results into a single section.
+```
+prompts/
+  system_prompt.md          — writing style and tone for all sections
+  lineage_system_prompt.md  — persona and rules for the Column Lineage section
+  purpose.md
+  flow.md
+  business_goal.md
+  data_quality.md
+  column_lineage.md
+```
 
-Lines starting with `>` are editorial notes — they are stripped before the prompt is sent to the LLM.
+Within a file you can split the prompt into multiple **sub-prompts** by placing a line containing only `---` between them. The agent makes one LLM call per sub-prompt and joins the results into a single section.
 
-**Available keys:** `system_prompt`, `lineage_system_prompt`, `purpose`, `flow`, `business_goal`, `data_quality`, `column_lineage`
+Lines starting with `>` are editorial notes — they are stripped before the prompt is sent to the LLM, so you can annotate files freely.
 
 **Template variables:**
 
@@ -149,10 +158,10 @@ Lines starting with `>` are editorial notes — they are stripped before the pro
 | `{{content}}` | Section-specific content extracted from the source files |
 | `{{rag_context}}` | Background context retrieved from the RAG index (empty when RAG is disabled) |
 
-To use a different prompts file:
+To use a different prompts folder:
 
 ```env
-PROMPTS_FILE=./my_prompts.md
+PROMPTS_DIR=./my_prompts
 ```
 
 ---
@@ -236,7 +245,7 @@ All settings are read from `.env`. See `.env.example` for the full list with com
 | `GITHUB_REPO_URL` | — | Git repository to clone into `./src` before scanning |
 | `OUTPUT_DIR` | `./output` | Directory where `.md` files are written |
 | `CONTEXT_FILE` | — | Plain-text file with organisation / domain context |
-| `PROMPTS_FILE` | `./prompts.md` | Markdown file with per-section prompt overrides |
+| `PROMPTS_DIR` | `./prompts` | Folder of per-section prompt files (`{key}.md`) |
 
 ### Purpose enrichment
 

@@ -11,7 +11,7 @@ import subprocess
 
 import agent.prompts as prompts
 from agent.ai.base_client import BaseLLMClient
-from agent.ai.llm_client import _clean_flow_output, _clean_lineage_output, _clean_output, build_system_prompt
+from agent.ai.utils import _clean_flow_output, _clean_lineage_output, _clean_output, build_system_prompt
 
 
 class LocalClaudeClient(BaseLLMClient):
@@ -44,10 +44,10 @@ class LocalClaudeClient(BaseLLMClient):
         return None
 
     # ------------------------------------------------------------------
-    # Internal
+    # LLM call primitives
     # ------------------------------------------------------------------
 
-    def _call(self, user_message: str) -> str:
+    def _call(self, user_message: str, max_tokens: int = 1024) -> str:
         full_prompt = f"{self._system_prompt}\n\n{user_message}"
         result = subprocess.run(
             ["claude", "-p", full_prompt],
@@ -84,41 +84,3 @@ class LocalClaudeClient(BaseLLMClient):
         if result.returncode != 0:
             raise RuntimeError(f"claude CLI exited with code {result.returncode}: {result.stderr.strip()}")
         return _clean_lineage_output(result.stdout.strip())
-
-    # ------------------------------------------------------------------
-    # Section methods — same prompts as LLMClient, no RAG context
-    # ------------------------------------------------------------------
-
-    def section_purpose(self, name: str, content: str, doc_group: str = "") -> str:
-        parts = []
-        for template in prompts.get_sub_prompts("purpose"):
-            parts.append(self._call(prompts.render(template, name=name, content=content[:2500], rag_context="")))
-        return "\n\n".join(parts)
-
-    def section_flow(self, name: str, content: str, doc_group: str = "") -> str:
-        parts = []
-        for template in prompts.get_sub_prompts("flow"):
-            prompt = prompts.render(template, name=name, content=content[:2500], rag_context="")
-            if "```mermaid" in template:
-                parts.append(self._call_flow(prompt))
-            else:
-                parts.append(self._call(prompt))
-        return "\n\n".join(parts)
-
-    def section_business_goal(self, name: str, content: str, doc_group: str = "") -> str:
-        parts = []
-        for template in prompts.get_sub_prompts("business_goal"):
-            parts.append(self._call(prompts.render(template, name=name, content=content[:2500], rag_context="")))
-        return "\n\n".join(parts)
-
-    def section_data_quality(self, name: str, content: str, doc_group: str = "") -> str:
-        parts = []
-        for template in prompts.get_sub_prompts("data_quality"):
-            parts.append(self._call(prompts.render(template, name=name, content=content[:3000], rag_context="")))
-        return "\n\n".join(parts)
-
-    def section_column_lineage(self, name: str, content: str, doc_group: str = "") -> str:
-        parts = []
-        for template in prompts.get_sub_prompts("column_lineage"):
-            parts.append(self._call_lineage(prompts.render(template, name=name, content=content[:6000], rag_context="")))
-        return "\n\n".join(parts)

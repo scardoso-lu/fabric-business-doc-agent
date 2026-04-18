@@ -29,7 +29,9 @@ from pathlib import Path
 # Built-in defaults
 # ---------------------------------------------------------------------------
 
-DEFAULT_SYSTEM_PROMPT = """You are a business analyst writing internal documentation for non-technical readers (managers, project owners, operations staff).
+DEFAULT_PROMPTS: dict[str, str] = {
+    "system_prompt": """\
+You are a business analyst writing internal documentation for non-technical readers (managers, project owners, operations staff).
 
 Goal:
 Explain what the data process does, why it matters, and how it behaves in practical terms.
@@ -51,9 +53,10 @@ Terminology:
 Structure:
 - Organize the explanation into short paragraphs.
 - Use bullet points only for rules, conditions, or checks.
-- Do not use headings or code blocks unless explicitly requested."""
+- Do not use headings or code blocks unless explicitly requested.""",
 
-DEFAULT_LINEAGE_SYSTEM_PROMPT = """You are a data lineage analyst. Extract column-level data lineage from the code provided.
+    "lineage_system_prompt": """\
+You are a data lineage analyst. Extract column-level data lineage from the code provided.
 
 Scope — only document tables that are written to persistent storage (data lake, lakehouse, or data warehouse):
 - PySpark / Python: tables written with df.write.saveAsTable(), df.write.format(...).save(...), spark.sql("CREATE TABLE ..."), COPY INTO, or equivalent.
@@ -70,12 +73,7 @@ Output rules (follow exactly):
 - "Transformation Logic" = a brief, plain-English description of what changes (e.g., "Cast to Integer", "Multiplied by tax rate", "Concatenated with separator", "Pass-through", "Derived from ML model output").
 - When multiple source columns are combined into one target column, append a footnote marker [^N] to the Transformation Logic cell and add a **Note N:** line after the table explaining the merge rule.
 - If no persisted tables with detectable column-level transformations are found, return this exact string: No column lineage detected in this artifact.
-- Do not output any introductory text, prose explanations, or commentary outside of tables and notes."""
-
-DEFAULT_PROMPTS: dict[str, str] = {
-    "system_prompt": DEFAULT_SYSTEM_PROMPT,
-
-    "lineage_system_prompt": DEFAULT_LINEAGE_SYSTEM_PROMPT,
+- Do not output any introductory text, prose explanations, or commentary outside of tables and notes.""",
 
     "purpose": """\
 {{rag_context}}In one or two sentences, explain why "{{name}}" exists and what business problem it solves.
@@ -194,12 +192,17 @@ _active: dict[str, str] | None = None
 def initialise(path: Path | None = None) -> None:
     """Load prompts from *path*, falling back to defaults for missing keys.
 
-    Safe to call multiple times — each call reloads from scratch.
+    *path* may be a **directory** — each section lives in its own ``{key}.md``
+    file — or a single markdown file with ``## key`` headings (legacy format).
+    Safe to call multiple times; each call reloads from scratch.
     """
     global _active
     merged = dict(DEFAULT_PROMPTS)
     if path is not None and path.exists():
-        overrides = _parse_file(path)
+        if path.is_dir():
+            overrides = _parse_dir(path)
+        else:
+            overrides = _parse_file(path)
         merged.update(overrides)
     _active = merged
 
@@ -246,8 +249,30 @@ def _reset() -> None:
 
 
 # ---------------------------------------------------------------------------
-# File parser
+# Loaders
 # ---------------------------------------------------------------------------
+
+def _parse_dir(directory: Path) -> dict[str, str]:
+    """Load prompts from a directory of individual Markdown files.
+
+    Each file must be named ``{section_key}.md``.  The entire file content is
+    treated as the prompt body — no ``## heading`` is needed.  Editorial
+    blockquote lines (lines starting with ``>``) are stripped before use, so
+    you can annotate files freely without affecting the LLM prompt.
+    """
+    result: dict[str, str] = {}
+    for key in DEFAULT_PROMPTS:
+        file_path = directory / f"{key}.md"
+        if file_path.exists():
+            try:
+                raw = file_path.read_text(encoding="utf-8")
+                body = _strip_blockquotes(raw).strip()
+                if body:
+                    result[key] = body
+            except OSError:
+                pass
+    return result
+
 
 def _parse_file(path: Path) -> dict[str, str]:
     """Parse a markdown file and return a dict of section_key → template."""

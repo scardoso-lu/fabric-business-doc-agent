@@ -27,9 +27,10 @@ PUBLISH_WIKI = os.getenv("PUBLISH_WIKI", "").lower() in ("1", "true", "yes")
 # Path to a plain-text file with company/project context (optional)
 # Content is appended to the system prompt to improve documentation quality.
 CONTEXT_FILE = os.getenv("CONTEXT_FILE", "")
-# Path to the prompt configuration markdown file.
-# Defaults to prompts.md in the project root. Set to "" to disable.
-PROMPTS_FILE = os.getenv("PROMPTS_FILE", str(ROOT_DIR / "prompts.md"))
+# Directory containing per-section prompt files ({key}.md).
+# Defaults to the prompts/ folder in the project root.
+# Set PROMPTS_DIR to a custom path to use a different folder.
+PROMPTS_DIR = Path(os.getenv("PROMPTS_DIR", str(ROOT_DIR / "prompts")))
 # Artifact types to scan — comma-separated list.
 # Supported values: pipeline, notebook, dataflow, powerautomate
 # Default omits powerautomate so existing repos are not affected.

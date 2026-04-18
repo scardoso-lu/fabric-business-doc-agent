@@ -28,7 +28,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 import agent.prompts as prompts
 from agent.ai.client_factory import create_client
-from agent.config import ARTIFACT_TYPES, CONTEXT_FILE, CONTEXT_TEXT, GITHUB_REPO_URL, OUTPUT_DIR, PROMPTS_FILE, PUBLISH_WIKI, SRC_DIR
+from agent.config import ARTIFACT_TYPES, CONTEXT_FILE, CONTEXT_TEXT, GITHUB_REPO_URL, OUTPUT_DIR, PROMPTS_DIR, PUBLISH_WIKI, SRC_DIR
 from agent.git_cloner import clone_repo
 from agent.rag.indexer import DocGroup, build_keyword_index, build_vector_index
 from agent.rag.retriever import RAGRetriever
@@ -117,10 +117,9 @@ def main(
     # ------------------------------------------------------------------
     # Prompts file (optional — per-section prompt customisation)
     # ------------------------------------------------------------------
-    prompts_path = Path(PROMPTS_FILE) if PROMPTS_FILE else None
-    prompts.initialise(prompts_path)
-    if prompts_path and prompts_path.exists():
-        console.print(f"[dim]Prompts loaded from [italic]{prompts_path}[/italic][/dim]\n")
+    prompts.initialise(PROMPTS_DIR)
+    if PROMPTS_DIR.exists():
+        console.print(f"[dim]Prompts loaded from [italic]{PROMPTS_DIR}[/italic][/dim]\n")
 
     # ------------------------------------------------------------------
     # Context file (optional — enriches system prompt with org/project info)

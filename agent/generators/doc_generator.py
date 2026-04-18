@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agent.ai.base_client import BaseLLMClient
-from agent.ai.llm_client import _summarise_props
+from agent.ai.utils import _summarise_props
 from agent.config import ACTIVITY_TYPE_LABELS, DATAFLOW_ACTIVITY_TYPES, DEPENDENCY_CONDITION_LABELS
 from agent.enrichers.ticket_enricher import fetch_ticket_context
 from agent.parsers.dataflow_parser import ParsedDataflow
@@ -234,12 +234,6 @@ def _pipeline_contents(
 
     return {
         "purpose": f"Pipeline: {pipeline.name}\nDescription: {description}\nSteps: {', '.join(activity_labels)}",
-        "what": (
-            f"Pipeline: {pipeline.name}\nDescription: {description}\n"
-            f"Steps in order: {', '.join(activity_labels)}\n"
-            + (f"Linked processes: {'; '.join(all_refs)}\n" if all_refs else "")
-            + (f"Code excerpt:\n{all_code[:2000]}" if all_code else "")
-        ),
         "relationships": (
             f"Pipeline: {pipeline.name}\n"
             + (f"External data sources: {'; '.join(sources)}\n" if sources else "")
@@ -295,10 +289,6 @@ def _notebook_contents(notebook: ParsedNotebook) -> dict[str, str]:
 
     return {
         "purpose": f"Process: {notebook.name}\nDescription: {description}\nSections: {headings}",
-        "what": (
-            f"Process: {notebook.name}\nDescription: {description}\n"
-            f"Sections: {headings}\nCode excerpt:\n{code[:3000]}"
-        ),
         "relationships": (
             f"Process: {notebook.name}\nDescription: {description}\nSections: {headings}"
         ),
@@ -329,7 +319,6 @@ def _dataflow_contents(dataflow: ParsedDataflow) -> dict[str, str]:
 
     return {
         "purpose": base + mcode[:2000],
-        "what":    base + mcode[:3000],
         "relationships": base + mcode[:2000],
         "goal":    base + mcode[:2000],
         "quality": (

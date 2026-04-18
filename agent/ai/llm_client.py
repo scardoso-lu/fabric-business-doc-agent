@@ -15,14 +15,22 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from agent.ai.base_client import BaseLLMClient
-from agent.config import EMBEDDING_MODEL, LLM_MODEL, LLM_PROVIDER, OLLAMA_BASE_URL
-from agent.prompts import DEFAULT_LINEAGE_SYSTEM_PROMPT as LINEAGE_SYSTEM_PROMPT
-from agent.prompts import DEFAULT_SYSTEM_PROMPT as SYSTEM_PROMPT
 import agent.prompts as prompts
+from agent.ai.base_client import BaseLLMClient
+from agent.ai.utils import (
+    _clean_flow_output,
+    _clean_lineage_output,
+    _clean_output,
+    _summarise_props,
+    build_system_prompt,
+)
+from agent.config import EMBEDDING_MODEL, LLM_MODEL, LLM_PROVIDER, OLLAMA_BASE_URL
 
 if TYPE_CHECKING:
     from agent.rag.retriever import RAGRetriever
+
+# Backward-compat alias used by tests
+SYSTEM_PROMPT = prompts.DEFAULT_PROMPTS["system_prompt"]
 
 # ---------------------------------------------------------------------------
 # Default models per provider
@@ -38,19 +46,6 @@ DEFAULT_EMBEDDING_MODELS = {
     "openai": "text-embedding-3-small",
     "ollama": "nomic-embed-text",
 }
-
-
-def build_system_prompt() -> str:
-    """Return the active system prompt, appending company/project context if set."""
-    from agent.config import CONTEXT_TEXT
-    base = prompts.get("system_prompt")
-    if not CONTEXT_TEXT:
-        return base
-    return (
-        f"{base}\n"
-        f"Organisation and project context — use this to make the documentation more specific "
-        f"and relevant:\n{CONTEXT_TEXT}\n"
-    )
 
 
 class LLMClient(BaseLLMClient):
@@ -126,7 +121,7 @@ class LLMClient(BaseLLMClient):
             return None
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # LLM call primitives
     # ------------------------------------------------------------------
 
     def _call(self, user_message: str, max_tokens: int = 1024) -> str:
@@ -148,7 +143,6 @@ class LLMClient(BaseLLMClient):
         """Like _call but uses the lineage system prompt and preserves table output."""
         lineage_sys = prompts.get("lineage_system_prompt")
         if self._provider == "anthropic":
-            import anthropic as _anthropic
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=1800,
@@ -169,7 +163,6 @@ class LLMClient(BaseLLMClient):
         return _clean_lineage_output(raw)
 
     def _call_anthropic(self, user_message: str, max_tokens: int) -> str:
-        import anthropic as _anthropic
         response = self._client.messages.create(
             model=self._model,
             max_tokens=max_tokens,
@@ -196,7 +189,7 @@ class LLMClient(BaseLLMClient):
         return response.choices[0].message.content.strip()
 
     # ------------------------------------------------------------------
-    # RAG context helper
+    # RAG context
     # ------------------------------------------------------------------
 
     def _get_rag_context(self, query: str, doc_group: str) -> str:
@@ -205,7 +198,6 @@ class LLMClient(BaseLLMClient):
         chunks = self._retriever.query(query, doc_group, top_k=3)
         if not chunks:
             return ""
-        # Keep only short, clean lines — skip anything that looks like an instruction
         clean_lines: list[str] = []
         skip_prefixes = ("return", "write", "document", "describe", "do not", "note:", "%%")
         for chunk in chunks:
@@ -218,52 +210,6 @@ class LLMClient(BaseLLMClient):
         joined = "\n".join(f"- {l}" for l in clean_lines[:12])
         return f"Relevant background about this process:\n{joined}\n\n"
 
-    # ------------------------------------------------------------------
-    # Public API — one method per document section
-    # ------------------------------------------------------------------
-
-    def section_purpose(self, name: str, content: str, doc_group: str = "") -> str:
-        bg = self._get_rag_context(f"purpose goal {name}", doc_group)
-        parts = []
-        for template in prompts.get_sub_prompts("purpose"):
-            prompt = prompts.render(template, name=name, content=content[:2500], rag_context=bg)
-            parts.append(self._call(prompt, max_tokens=300))
-        return "\n\n".join(parts)
-
-    def section_flow(self, name: str, content: str, doc_group: str = "") -> str:
-        bg = self._get_rag_context(f"dependencies connections sources outputs {name}", doc_group)
-        parts = []
-        for template in prompts.get_sub_prompts("flow"):
-            prompt = prompts.render(template, name=name, content=content[:2500], rag_context=bg)
-            if "```mermaid" in template:
-                parts.append(self._call_flow(prompt))
-            else:
-                parts.append(self._call(prompt, max_tokens=600))
-        return "\n\n".join(parts)
-
-    def section_business_goal(self, name: str, content: str, doc_group: str = "") -> str:
-        bg = self._get_rag_context(f"business outcome value {name}", doc_group)
-        parts = []
-        for template in prompts.get_sub_prompts("business_goal"):
-            prompt = prompts.render(template, name=name, content=content[:2500], rag_context=bg)
-            parts.append(self._call(prompt, max_tokens=300))
-        return "\n\n".join(parts)
-
-    def section_data_quality(self, name: str, content: str, doc_group: str = "") -> str:
-        bg = self._get_rag_context(f"validation error handling alerts quality {name}", doc_group)
-        parts = []
-        for template in prompts.get_sub_prompts("data_quality"):
-            prompt = prompts.render(template, name=name, content=content[:3000], rag_context=bg)
-            parts.append(self._call(prompt, max_tokens=350))
-        return "\n\n".join(parts)
-
-    def section_column_lineage(self, name: str, content: str, doc_group: str = "") -> str:
-        parts = []
-        for template in prompts.get_sub_prompts("column_lineage"):
-            prompt = prompts.render(template, name=name, content=content[:6000], rag_context="")
-            parts.append(self._call_lineage(prompt))
-        return "\n\n".join(parts)
-
     @property
     def provider(self) -> str:
         return self._provider
@@ -271,91 +217,3 @@ class LLMClient(BaseLLMClient):
     @property
     def model(self) -> str:
         return self._model
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_NOISE_PREFIXES = (
-    "no ", "note:", "answer", "paragraph", "section", "write ", "return ",
-    "do not", "%%", "example:", "output:", "response:",
-)
-
-
-def _clean_output(text: str) -> str:
-    """Remove common LLM artefacts: echoed instructions, meta-comments, code fences."""
-    lines = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        lower = stripped.lower()
-        # Drop lines that are echoed instructions or meta-comments
-        if any(lower.startswith(p) for p in _NOISE_PREFIXES):
-            continue
-        # Drop code fences
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            continue
-        # Drop lines that are just punctuation or single characters
-        if len(stripped) <= 2:
-            continue
-        lines.append(line)
-    cleaned = "\n".join(lines).strip()
-    # Collapse 3+ blank lines into 2
-    import re
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned or "Insufficient information available."
-
-
-def _clean_flow_output(text: str) -> str:
-    """Clean flow section output, preserving the mermaid diagram block intact."""
-    import re
-    mermaid_start = text.find("```mermaid")
-    if mermaid_start == -1:
-        return _clean_output(text)
-
-    text_part = text[:mermaid_start]
-    diagram_part = text[mermaid_start:]
-
-    cleaned_text = _clean_output(text_part)
-
-    # Find the closing fence (skip past the opening ```mermaid)
-    closing = diagram_part.find("```", len("```mermaid"))
-    if closing == -1:
-        mermaid_block = diagram_part.rstrip() + "\n```"
-    else:
-        mermaid_block = diagram_part[: closing + 3]
-
-    # Collapse excess blank lines inside the mermaid block
-    mermaid_block = re.sub(r"\n{3,}", "\n\n", mermaid_block)
-
-    return f"{cleaned_text}\n\n{mermaid_block}".strip() or "Insufficient information available."
-
-
-def _clean_lineage_output(text: str) -> str:
-    """Minimal cleanup for lineage section — preserves markdown tables, headings, and notes."""
-    import re
-    lines = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            continue
-        lines.append(line)
-    cleaned = "\n".join(lines).strip()
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned or "No column lineage detected in this artifact."
-
-
-def _summarise_props(props: dict) -> str:
-    if not props:
-        return "(none)"
-    parts = []
-    for k, v in props.items():
-        if isinstance(v, dict):
-            parts.append(f"{k}: {{...}}")
-        elif isinstance(v, list):
-            parts.append(f"{k}: [{len(v)} items]")
-        elif isinstance(v, str) and len(v) > 120:
-            parts.append(f"{k}: {v[:120]}…")
-        else:
-            parts.append(f"{k}: {v}")
-    return ", ".join(parts)

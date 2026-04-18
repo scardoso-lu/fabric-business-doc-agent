@@ -179,7 +179,7 @@ class TestPipelineContents:
     def test_returns_all_section_keys(self):
         pipeline = make_pipeline(activities=[make_activity()])
         contents = _pipeline_contents(pipeline, {})
-        assert set(contents.keys()) == {"purpose", "what", "relationships", "goal", "quality"}
+        assert set(contents.keys()) == {"purpose", "relationships", "goal", "quality"}
 
     def test_pipeline_name_in_all_sections(self):
         pipeline = make_pipeline(name="SalesPipeline")
@@ -187,7 +187,7 @@ class TestPipelineContents:
         for key, value in contents.items():
             assert "SalesPipeline" in value, f"Pipeline name missing from '{key}' section"
 
-    def test_linked_notebook_appears_in_what(self):
+    def test_linked_notebook_appears_in_relationships(self):
         nb = make_notebook(name="TransformData")
         activity = make_activity(
             activity_type="TridentNotebook",
@@ -195,7 +195,7 @@ class TestPipelineContents:
         )
         pipeline = make_pipeline(activities=[activity])
         contents = _pipeline_contents(pipeline, {"TransformData": nb})
-        assert "TransformData" in contents["what"]
+        assert "TransformData" in contents["relationships"]
 
     def test_external_source_appears_in_relationships(self):
         activity = make_activity(
@@ -222,7 +222,7 @@ class TestNotebookContents:
     def test_returns_all_section_keys(self):
         nb = make_notebook()
         contents = _notebook_contents(nb)
-        assert set(contents.keys()) == {"purpose", "what", "relationships", "goal", "quality"}
+        assert set(contents.keys()) == {"purpose", "relationships", "goal", "quality"}
 
     def test_notebook_name_in_all_sections(self):
         nb = make_notebook(name="RevenueCalc")
@@ -441,7 +441,7 @@ class TestDataflowContents:
     def test_returns_all_section_keys(self):
         df = make_dataflow()
         contents = _dataflow_contents(df)
-        assert set(contents.keys()) == {"purpose", "what", "relationships", "goal", "quality"}
+        assert set(contents.keys()) == {"purpose", "relationships", "goal", "quality"}
 
     def test_dataflow_name_in_all_sections(self):
         df = make_dataflow(name="SalesTransform")
@@ -488,7 +488,7 @@ class TestLineageContentDataflow:
 # ---------------------------------------------------------------------------
 
 class TestPipelineContentsWithDataflow:
-    def test_dataflow_queries_appear_in_what(self):
+    def test_dataflow_queries_appear_in_relationships(self):
         query = make_dataflow_query(name="GoldQuery")
         df = make_dataflow(name="SalesDF", queries=[query])
         activity = make_activity(
@@ -498,12 +498,12 @@ class TestPipelineContentsWithDataflow:
         )
         pipeline = make_pipeline(activities=[activity])
         contents = _pipeline_contents(pipeline, {}, {"SalesDF": df})
-        assert "SalesDF" in contents["what"]
+        assert "SalesDF" in contents["relationships"]
 
     def test_no_dataflow_map_still_works(self):
         pipeline = make_pipeline(activities=[make_activity()])
         contents = _pipeline_contents(pipeline, {})
-        assert set(contents.keys()) == {"purpose", "what", "relationships", "goal", "quality"}
+        assert set(contents.keys()) == {"purpose", "relationships", "goal", "quality"}
 
 
 # ---------------------------------------------------------------------------

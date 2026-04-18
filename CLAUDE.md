@@ -30,15 +30,23 @@ Run the test suite: `uv run pytest`
 
 ## Prompt Customisation
 
-Every section prompt lives in `prompts.md` at the project root. Edit any `## section_key` block to change what the LLM is asked to produce. The file is read once at startup; missing sections fall back to built-in defaults.
+Each section prompt lives in its own file inside the `prompts/` folder. Edit the file for the section you want to change; the next run picks it up. Missing files fall back to built-in defaults.
 
-Available section keys: `system_prompt`, `lineage_system_prompt`, `purpose`, `flow`, `business_goal`, `data_quality`, `column_lineage`.
+```
+prompts/
+  system_prompt.md          lineage_system_prompt.md
+  purpose.md                flow.md
+  business_goal.md          data_quality.md
+  column_lineage.md
+```
+
+File format: the entire file content is the prompt body. Lines starting with `>` are editorial notes stripped before the LLM call. Sub-prompts within a file are separated by a line containing only `---`.
 
 Template variables: `{{name}}` (artifact name), `{{content}}` (extracted source data), `{{rag_context}}` (RAG background, empty when RAG is disabled).
 
-Override the file path via `PROMPTS_FILE=./my_prompts.md` in `.env`.
+Override the folder via `PROMPTS_DIR=./my_prompts` in `.env`.
 
-The `agent/prompts.py` module owns loading (`initialise`), retrieval (`get`), and rendering (`render`). Both `LLMClient` and `LocalClaudeClient` call `prompts.render(prompts.get(key), ...)` in every section method.
+`agent/prompts.py` owns loading (`initialise` — accepts a directory or legacy single file), retrieval (`get`), and rendering (`render`). `_parse_dir()` loads from a folder; `_parse_file()` loads from the legacy single-file format. Both `LLMClient` and `LocalClaudeClient` call `prompts.render(prompts.get(key), ...)` in every section method.
 
 ## End-to-End Data Flow
 
@@ -128,6 +136,7 @@ All settings via `.env` (copy from `.env.example`):
 | Variable | Default | Notes |
 |---|---|---|
 | `ARTIFACT_TYPES` | `pipeline,notebook,dataflow` | Comma-separated artifact types to scan; add `powerautomate` to include Power Automate flows |
+| `PROMPTS_DIR` | `./prompts` | Folder of per-section prompt files (`{key}.md`) |
 | `LLM_PROVIDER` | `anthropic` | `anthropic`, `openai`, `ollama`, or `local` |
 | `LLM_MODEL` | provider default | `claude-sonnet-4-6` / `gpt-4o-mini` / `llama3.2` / ignored for `local` |
 | `ANTHROPIC_API_KEY` | — | Required for `anthropic` |

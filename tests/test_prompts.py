@@ -9,6 +9,7 @@ import agent.prompts as prompts_mod
 from agent.prompts import (
     DEFAULT_PROMPTS,
     SECTION_KEYS,
+    _parse_dir,
     _parse_file,
     _reset,
     _strip_blockquotes,
@@ -167,6 +168,118 @@ class TestInitialiseFromFile:
         result = render(get("purpose"), name="SalesPipeline", content="...", rag_context="")
         assert "SalesPipeline" in result
         assert "Tell me about" in result
+
+
+# ---------------------------------------------------------------------------
+# initialise — directory overrides
+# ---------------------------------------------------------------------------
+
+class TestInitialiseFromDir:
+    def _make_dir(self, tmp_path: Path, files: dict[str, str]) -> Path:
+        d = tmp_path / "prompts"
+        d.mkdir()
+        for name, content in files.items():
+            (d / name).write_text(content, encoding="utf-8")
+        return d
+
+    def test_overrides_single_section(self, tmp_path):
+        d = self._make_dir(tmp_path, {"purpose.md": "My custom purpose for {{name}}."})
+        initialise(d)
+        assert get("purpose") == "My custom purpose for {{name}}."
+
+    def test_missing_file_keeps_default(self, tmp_path):
+        d = self._make_dir(tmp_path, {"purpose.md": "Custom purpose."})
+        initialise(d)
+        assert get("flow") == DEFAULT_PROMPTS["flow"]
+
+    def test_overrides_system_prompt(self, tmp_path):
+        d = self._make_dir(tmp_path, {"system_prompt.md": "You are a concise writer."})
+        initialise(d)
+        assert get("system_prompt") == "You are a concise writer."
+
+    def test_multiple_files_override_multiple_sections(self, tmp_path):
+        d = self._make_dir(tmp_path, {
+            "purpose.md": "Custom purpose.",
+            "business_goal.md": "Custom goal.",
+        })
+        initialise(d)
+        assert get("purpose") == "Custom purpose."
+        assert get("business_goal") == "Custom goal."
+        assert get("flow") == DEFAULT_PROMPTS["flow"]
+
+    def test_blockquotes_stripped_from_file(self, tmp_path):
+        d = self._make_dir(tmp_path, {"purpose.md": "> Editor note\n\nReal prompt."})
+        initialise(d)
+        assert get("purpose") == "Real prompt."
+
+    def test_sub_prompt_separator_preserved(self, tmp_path):
+        d = self._make_dir(tmp_path, {"purpose.md": "First part.\n\n---\n\nSecond part."})
+        initialise(d)
+        result = get_sub_prompts("purpose")
+        assert len(result) == 2
+        assert result[0] == "First part."
+        assert result[1] == "Second part."
+
+    def test_empty_directory_keeps_all_defaults(self, tmp_path):
+        d = tmp_path / "empty_prompts"
+        d.mkdir()
+        initialise(d)
+        for key in SECTION_KEYS:
+            assert get(key) == DEFAULT_PROMPTS[key]
+
+    def test_only_blockquote_body_keeps_default(self, tmp_path):
+        d = self._make_dir(tmp_path, {"purpose.md": "> Just a note\n"})
+        initialise(d)
+        assert get("purpose") == DEFAULT_PROMPTS["purpose"]
+
+    def test_render_uses_dir_override(self, tmp_path):
+        d = self._make_dir(tmp_path, {"purpose.md": "Tell me about {{name}}."})
+        initialise(d)
+        result = render(get("purpose"), name="MyPipeline", content="...", rag_context="")
+        assert "MyPipeline" in result
+
+
+# ---------------------------------------------------------------------------
+# _parse_dir
+# ---------------------------------------------------------------------------
+
+class TestParseDir:
+    def _make_dir(self, tmp_path: Path, files: dict[str, str]) -> Path:
+        d = tmp_path / "prompts"
+        d.mkdir()
+        for name, content in files.items():
+            (d / name).write_text(content, encoding="utf-8")
+        return d
+
+    def test_parses_known_section_file(self, tmp_path):
+        d = self._make_dir(tmp_path, {"purpose.md": "Hello {{name}}."})
+        result = _parse_dir(d)
+        assert result == {"purpose": "Hello {{name}}."}
+
+    def test_ignores_unknown_filenames(self, tmp_path):
+        d = self._make_dir(tmp_path, {"bogus.md": "Some text."})
+        result = _parse_dir(d)
+        assert "bogus" not in result
+
+    def test_strips_blockquotes(self, tmp_path):
+        d = self._make_dir(tmp_path, {"purpose.md": "> Note\n\nActual body."})
+        result = _parse_dir(d)
+        assert result["purpose"] == "Actual body."
+        assert "> Note" not in result["purpose"]
+
+    def test_only_blockquote_body_excluded(self, tmp_path):
+        d = self._make_dir(tmp_path, {"purpose.md": "> Only a note\n"})
+        result = _parse_dir(d)
+        assert "purpose" not in result
+
+    def test_all_section_keys_loaded(self, tmp_path):
+        d = self._make_dir(tmp_path, {f"{k}.md": f"Body for {k}." for k in SECTION_KEYS})
+        result = _parse_dir(d)
+        assert set(result.keys()) == set(SECTION_KEYS)
+
+    def test_missing_directory_returns_empty(self, tmp_path):
+        result = _parse_dir(tmp_path / "nonexistent")
+        assert result == {}
 
 
 # ---------------------------------------------------------------------------
