@@ -26,16 +26,20 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
+import agent.prompts as prompts
 from agent.ai.client_factory import create_client
-from agent.config import CONTEXT_FILE, CONTEXT_TEXT, GITHUB_REPO_URL, OUTPUT_DIR, PUBLISH_WIKI, SRC_DIR
+from agent.config import CONTEXT_FILE, CONTEXT_TEXT, GITHUB_REPO_URL, OUTPUT_DIR, PROMPTS_FILE, PUBLISH_WIKI, SRC_DIR
 from agent.git_cloner import clone_repo
 from agent.rag.indexer import DocGroup, build_keyword_index, build_vector_index
 from agent.rag.retriever import RAGRetriever
 from agent.generators.doc_generator import (
+    generate_dataflow_doc,
     generate_notebook_doc,
     generate_pipeline_doc,
+    get_linked_dataflows,
     get_linked_notebooks,
 )
+from agent.parsers.dataflow_parser import ParsedDataflow, find_dataflow_files, parse_dataflow_file
 from agent.parsers.notebook_parser import ParsedNotebook, find_notebook_files, parse_notebook_file
 from agent.parsers.pipeline_parser import find_pipeline_files, parse_pipeline_file
 from agent.publishers.base_wiki_publisher import BaseWikiPublisher
@@ -63,6 +67,7 @@ console = Console()
 )
 @click.option("--pipelines-only", is_flag=True, default=False, help="Only process pipeline JSON files.")
 @click.option("--notebooks-only", is_flag=True, default=False, help="Only process notebook .ipynb files.")
+@click.option("--dataflows-only", is_flag=True, default=False, help="Only process Dataflow Gen2 files.")
 @click.option(
     "--pipeline",
     "pipeline_filter",
@@ -75,19 +80,35 @@ console = Console()
     default=None,
     help="Process only the notebook whose file stem matches this value.",
 )
+@click.option(
+    "--dataflow",
+    "dataflow_filter",
+    default=None,
+    help="Process only the dataflow whose name matches this value.",
+)
 def main(
     src_dir: Path,
     output_dir: Path,
     pipelines_only: bool,
     notebooks_only: bool,
+    dataflows_only: bool,
     pipeline_filter: str | None,
     notebook_filter: str | None,
+    dataflow_filter: str | None,
 ) -> None:
     console.print(Panel.fit("[bold cyan]Fabric Business Documentation Agent[/bold cyan]"))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     for f in output_dir.glob("*.md"):
         f.unlink()
+
+    # ------------------------------------------------------------------
+    # Prompts file (optional — per-section prompt customisation)
+    # ------------------------------------------------------------------
+    prompts_path = Path(PROMPTS_FILE) if PROMPTS_FILE else None
+    prompts.initialise(prompts_path)
+    if prompts_path and prompts_path.exists():
+        console.print(f"[dim]Prompts loaded from [italic]{prompts_path}[/italic][/dim]\n")
 
     # ------------------------------------------------------------------
     # Context file (optional — enriches system prompt with org/project info)
@@ -121,25 +142,33 @@ def main(
     # ------------------------------------------------------------------
     # Discover source files
     # ------------------------------------------------------------------
-    notebook_files = [] if pipelines_only else find_notebook_files(src_dir)
-    pipeline_files = [] if notebooks_only else find_pipeline_files(src_dir)
+    scan_pipelines  = not notebooks_only and not dataflows_only
+    scan_notebooks  = not pipelines_only and not dataflows_only
+    scan_dataflows  = not pipelines_only and not notebooks_only
+
+    notebook_files = find_notebook_files(src_dir) if scan_notebooks else []
+    pipeline_files = find_pipeline_files(src_dir) if scan_pipelines else []
+    dataflow_files = find_dataflow_files(src_dir) if scan_dataflows else []
 
     if notebook_filter:
         notebook_files = [f for f in notebook_files if f.stem == notebook_filter]
     if pipeline_filter:
         pipeline_files = [f for f in pipeline_files if f.stem == pipeline_filter]
+    if dataflow_filter:
+        dataflow_files = [f for f in dataflow_files if f.stem == dataflow_filter]
 
     console.print(
-        f"Found [bold]{len(pipeline_files)}[/bold] pipeline(s) and "
-        f"[bold]{len(notebook_files)}[/bold] notebook(s) under [italic]{src_dir}[/italic]"
+        f"Found [bold]{len(pipeline_files)}[/bold] pipeline(s), "
+        f"[bold]{len(notebook_files)}[/bold] notebook(s), and "
+        f"[bold]{len(dataflow_files)}[/bold] dataflow(s) under [italic]{src_dir}[/italic]"
     )
 
-    if not pipeline_files and not notebook_files:
+    if not pipeline_files and not notebook_files and not dataflow_files:
         console.print("[yellow]Nothing to process. Exiting.[/yellow]")
         sys.exit(0)
 
     # ------------------------------------------------------------------
-    # Parse all notebooks upfront (needed for pipeline linking)
+    # Parse all notebooks and dataflows upfront (needed for pipeline linking)
     # ------------------------------------------------------------------
     notebook_map: dict[str, ParsedNotebook] = {}
     for nb_path in notebook_files:
@@ -147,14 +176,20 @@ def main(
         if nb:
             notebook_map[nb.name] = nb
 
+    dataflow_map: dict[str, ParsedDataflow] = {}
+    for df_path in dataflow_files:
+        df = parse_dataflow_file(df_path)
+        if df:
+            dataflow_map[df.name] = df
+
     # ------------------------------------------------------------------
-    # Parse all pipelines upfront and identify linked notebooks
-    # Linked notebooks are documented as tasks inside their pipeline's doc
+    # Parse all pipelines upfront and identify linked notebooks/dataflows.
+    # Linked items are documented within their pipeline's doc
     # and do NOT get a standalone .md file.
     # ------------------------------------------------------------------
     parsed_pipelines = []
-    # maps notebook name → pipeline name(s) it belongs to
     linked_notebooks: dict[str, str] = {}
+    linked_dataflows: dict[str, str] = {}
 
     for pf in pipeline_files:
         pipeline = parse_pipeline_file(pf)
@@ -163,16 +198,24 @@ def main(
         parsed_pipelines.append(pipeline)
         for nb_name in get_linked_notebooks(pipeline, notebook_map):
             linked_notebooks[nb_name] = pipeline.name
+        for df_name in get_linked_dataflows(pipeline, dataflow_map):
+            linked_dataflows[df_name] = pipeline.name
 
     orphan_notebooks = {
         name: nb for name, nb in notebook_map.items()
         if name not in linked_notebooks
     }
+    orphan_dataflows = {
+        name: df for name, df in dataflow_map.items()
+        if name not in linked_dataflows
+    }
 
     console.print(
         f"  {len(parsed_pipelines)} pipeline(s) · "
         f"{len(linked_notebooks)} linked notebook(s) · "
-        f"{len(orphan_notebooks)} orphan notebook(s)\n"
+        f"{len(orphan_notebooks)} orphan notebook(s) · "
+        f"{len(linked_dataflows)} linked dataflow(s) · "
+        f"{len(orphan_dataflows)} orphan dataflow(s)\n"
     )
 
     # ------------------------------------------------------------------
@@ -197,9 +240,16 @@ def main(
                 for name in get_linked_notebooks(pipeline, notebook_map)
                 if name in notebook_map
             ]
-            doc_groups.append(DocGroup(group_id=pipeline.name, pipeline=pipeline, notebooks=linked_nbs))
+            linked_dfs = [
+                dataflow_map[name]
+                for name in get_linked_dataflows(pipeline, dataflow_map)
+                if name in dataflow_map
+            ]
+            doc_groups.append(DocGroup(group_id=pipeline.name, pipeline=pipeline, notebooks=linked_nbs, dataflows=linked_dfs))
         for nb_name, nb in orphan_notebooks.items():
             doc_groups.append(DocGroup(group_id=nb_name, pipeline=None, notebooks=[nb]))
+        for df_name, df in orphan_dataflows.items():
+            doc_groups.append(DocGroup(group_id=df_name, pipeline=None, dataflows=[df]))
 
         console.print("[bold]Building RAG index…[/bold]")
 
@@ -252,7 +302,7 @@ def main(
                     if wiki and wiki.page_exists(pipeline.name):
                         console.print(f"  [dim]⏭  {pipeline.name} — wiki page exists, skipping.[/dim]")
                         continue
-                    markdown = generate_pipeline_doc(pipeline, notebook_map, client)
+                    markdown = generate_pipeline_doc(pipeline, notebook_map, client, dataflow_map)
                     out_path = output_dir / f"{pipeline.name}.md"
                     out_path.write_text(markdown, encoding="utf-8")
                     msg = f"  [green]✓[/green] {out_path.name}"
@@ -300,6 +350,43 @@ def main(
         console.print(
             "\n[dim]All notebooks are linked to pipelines — "
             "no standalone notebook docs generated.[/dim]"
+        )
+
+    # ------------------------------------------------------------------
+    # Process orphan dataflows (not linked to any pipeline)
+    # ------------------------------------------------------------------
+    if orphan_dataflows:
+        console.print("\n[bold]Generating orphan dataflow documentation…[/bold]")
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Processing…", total=len(orphan_dataflows))
+            for df_name, dataflow in orphan_dataflows.items():
+                progress.update(task, description=f"Dataflow: [cyan]{df_name}[/cyan]")
+                try:
+                    if wiki and wiki.page_exists(df_name):
+                        console.print(f"  [dim]⏭  {df_name} — wiki page exists, skipping.[/dim]")
+                        continue
+                    markdown = generate_dataflow_doc(dataflow, client)
+                    out_path = output_dir / f"{df_name}.md"
+                    out_path.write_text(markdown, encoding="utf-8")
+                    msg = f"  [green]✓[/green] {out_path.name}"
+                    if wiki:
+                        url = wiki.publish(df_name, markdown)
+                        msg += f" → [dim]{url}[/dim]"
+                    console.print(msg)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"Error generating docs for dataflow {df_name}: {exc}")
+                finally:
+                    progress.advance(task)
+
+    if linked_dataflows and not orphan_dataflows:
+        console.print(
+            "\n[dim]All dataflows are linked to pipelines — "
+            "no standalone dataflow docs generated.[/dim]"
         )
 
     # ------------------------------------------------------------------

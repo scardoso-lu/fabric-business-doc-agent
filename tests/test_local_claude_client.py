@@ -150,16 +150,15 @@ class TestCallFlow:
 
 class TestSectionMethods:
     def _patched_call(self, method_name: str, *args):
+        """Verify _call is invoked at least once (once per sub-prompt)."""
         client = _make_client()
         with patch.object(client, "_call", return_value="section text") as m:
-            getattr(client, method_name)(*args)
-            m.assert_called_once()
+            result = getattr(client, method_name)(*args)
+            assert m.call_count >= 1
+            assert isinstance(result, str)
 
     def test_section_purpose_calls_call(self):
         self._patched_call("section_purpose", "PipelineName", "content")
-
-    def test_section_what_it_does_calls_call(self):
-        self._patched_call("section_what_it_does", "PipelineName", "content")
 
     def test_section_business_goal_calls_call(self):
         self._patched_call("section_business_goal", "PipelineName", "content")
@@ -170,5 +169,6 @@ class TestSectionMethods:
     def test_section_flow_calls_call_flow(self):
         client = _make_client()
         with patch.object(client, "_call_flow", return_value="flow text") as m:
-            client.section_flow("PipelineName", "content")
-            m.assert_called_once()
+            with patch.object(client, "_call", return_value="prose text"):
+                client.section_flow("PipelineName", "content")
+            assert m.call_count >= 1

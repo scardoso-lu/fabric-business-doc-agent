@@ -27,6 +27,9 @@ PUBLISH_WIKI = os.getenv("PUBLISH_WIKI", "").lower() in ("1", "true", "yes")
 # Path to a plain-text file with company/project context (optional)
 # Content is appended to the system prompt to improve documentation quality.
 CONTEXT_FILE = os.getenv("CONTEXT_FILE", "")
+# Path to the prompt configuration markdown file.
+# Defaults to prompts.md in the project root. Set to "" to disable.
+PROMPTS_FILE = os.getenv("PROMPTS_FILE", str(ROOT_DIR / "prompts.md"))
 CONTEXT_TEXT: str = ""
 if CONTEXT_FILE:
     try:
@@ -42,6 +45,10 @@ BRONZE_ACTIVITY_TYPES = {
 # Silver — transformation activities (clean, enrich, apply business logic)
 SILVER_ACTIVITY_TYPES = {
     "TridentNotebook", "Notebook", "Script",
+}
+# Gold — dataflow activities (Power Query transformations producing final tables)
+DATAFLOW_ACTIVITY_TYPES = {
+    "ExecuteDataflow", "Dataflow",
 }
 # Control-flow activities — not assigned to a layer
 CONTROL_ACTIVITY_TYPES = {
@@ -64,6 +71,8 @@ ACTIVITY_TYPE_LABELS = {
     "GetMetadata":      "Inspect File / Table Info",
     "Delete":           "Delete Files",
     "Script":           "Run SQL Script",
+    "ExecuteDataflow":  "Run Dataflow",
+    "Dataflow":         "Run Dataflow",
     "Fail":             "Raise Error",
     "Filter":           "Filter Items",
     "Until":            "Repeat Until Condition",

@@ -4,42 +4,66 @@
 | --- | --- |
 | **Type** | Pipeline |
 | **Source file** | `population_data_ingestion.json` |
-| **Generated** | 2026-04-17 |
+| **Generated** | 2026-04-18 |
 
 
 ## Purpose
 
-The EU Population Data Ingestion process exists to keep the organisation's population figures accurate and up to date. Without it, teams that rely on population data â€” for planning, forecasting, or performance reporting â€” would be working from outdated or incomplete numbers.
-If this process did not run, any report or calculation that depends on EU population figures would either fail entirely or produce results based on stale data. Decisions about market sizing, regional resource allocation, or regulatory reporting could be made on figures that no longer reflect reality.
+The EU Population Data Ingestion process collects projected population numbers for the entire European Union. It solves the problem of having raw, complex population statistics by turning them into a clean, reliable report that managers can use for planning.
+The process first downloads the needed
 
-## What It Does
-
-The EU Population Data Ingestion process pulls official projected population figures from Eurostat, the European Union's statistics authority, and prepares them for use in internal reporting. It runs automatically, without manual intervention, and covers population projections broken down by region across EU member states.
-The process begins by downloading a data file directly from the Eurostat website. Once the file arrives, the process checks that it is not empty before doing anything further. If the file passes that check, a linked data process takes over: it loads the raw records, cleans and reshapes them â€” splitting combined fields, removing unnecessary columns, standardising text spacing, converting values into consistent formats, and filtering out records that fall outside the scope of reporting. The process then repeats this transformation step for each region covered in the file, ensuring every geographic area is handled consistently. Finally, any temporary files created during the download are removed, and the clean, transformed data records are saved into the central reporting storage area, ready for use by downstream reports and dashboards.
+The business loses access to accurate, current projected EU population figures required for operational planning and reporting.
 
 ## Flow
 
-This process pulls population projection files from Eurostat, the European Union's official statistics service, and validates them before any further work begins. It accepts three inputs at run time: which regions to include, which projection scenario to apply, and where the final records should land.
-Once the file passes validation, a linked data process cleans and reshapes the records â€” splitting combined fields, removing unnecessary columns, standardising formats, and filtering to the relevant population segments. The finished data set is then saved to the target storage area specified at run time, ready for downstream reporting or analysis.
+This process collects projected European Union population numbers from Eurostat, a specialized data provider. First, the system downloads the raw population file from Eurostat. After downloading the file, it runs checks to make sure the data arrived correctly and that the file is not empty. The process also uses specific inputs, such as the regions and the expected population scenario, to correctly focus the data.
+Next, the data undergoes several cleanup and adjustment steps. The system standardizes existing fields, removes unnecessary columns, and corrects the format of the population values. It converts the data into a useable format and organizes the regions. Finally, the clean, adjusted population data moves into the reporting storage location, making it ready for managers and analysts to view and build reports from.
+
+Insufficient information available.
 
 ```mermaid
 flowchart LR
-    Eurostat[Eurostat Statistics Service] --> Download[Download Population File]
-    Download --> Validate[Validate Downloaded File]
-    Validate --> Transform[EU Population Data Ingestion â€” Clean and Reshape Records]
-    Transform --> Output[Target Storage Area]
+    EurostatData[Eurostat Data Files] --> EUPopulationDataIngestion[EU Population Data Ingestion] --> DownstreamReports[Reports and Analytics]
 ```
 
 ## Business Goal
 
-The EU Population Data Ingestion process keeps the organisation's population figures current and accurate by pulling the latest projections directly from Eurostat, Europe's official statistical authority. It validates the data on arrival, applies standard business rules, and delivers a clean, ready-to-use data set to the central reporting area. Without this process running successfully, any population figures used across the business would be stale or missing entirely.
-Teams that size markets, plan resource allocation, or track demographic trends across European regions depend on this data being present and up to date. Strategic planning, sales territory management, and regulatory reporting are all downstream of it â€” any analysis that answers "how many people live where, and how is that changing?" draws from what this process delivers.
+This process gathers and prepares reliable population forecasts for the entire European Union. It creates a single, stable source of truth that helps planners model future demographic trends, supporting strategic budgeting and policy development.
+The process starts by downloading the latest projected population records from Eurostat, the European statistics agency.
+First, the system validates the downloaded file to ensure all the necessary data arrived correctly. Next, it runs a quick check to guarantee the file contains any
+
+Insufficient information available.
 
 ## Data Quality & Alerts
 
-The process includes one explicit check after the file arrives from the Eurostat data feed: it confirms the file is not empty before doing anything further. If the file arrives with no content â€” for example, because the external service returned an error or the download was incomplete â€” the process takes a separate path defined by that branch. Based on the configuration, one follow-up action is triggered in that failure case, though the exact response (stop, alert, or skip) is not fully visible in the excerpt provided.
+Insufficient information available.
+
+Insufficient information available.
+
+## Column Lineage
+
+### Bronze → Intermediate (Split)
+| Source | Target Column | Transformation Logic |
+| :--- | :--- | :--- |
+| freq,projection,sex,age,unit,geo\TIME_PERIOD | freq | Split the source column using comma delimiter, take the 1st item (index 0). |
+| freq,projection,sex,age,unit,geo\TIME_PERIOD | projection | Split the source column using comma delimiter, take the 2nd item (index 1). |
+| freq,projection,sex,age,unit,geo\TIME_PERIOD | sex | Split the source column using comma delimiter, take the 3rd item (index 2). |
+| freq,projection,sex,age,unit,geo\TIME_PERIOD | age | Split the source column using comma delimiter, take the 4th item (index 3). |
+| freq,projection,sex,age,unit,geo\TIME_PERIOD | unit | Split the source column using comma delimiter, take the 5th item (index 4). |
+| freq,projection,sex,age,unit,geo\TIME_PERIOD | geo | Split the source column using comma delimiter, take the 6th item (index 5). |
+
+**Note 1:** The original column `freq,projection,sex,age,unit,geo\TIME_PERIOD` is split into six individual columns.
+
+### Intermediate → Latest State (Drop)
+| Source | Target Column | Transformation Logic |
+| :--- | :--- | :--- |
+| projection | projection | Pass-through (retained field) |
+| sex | sex | Pass-through (retained field) |
+| geo | geo | Pass-through (retained field) |
+
+**Note 2:** The fields `freq`, `age`, and `unit` were explicitly dropped from the dataset.
 
 
 ---
 
-*Documentation generated on 2026-04-17 from `population_data_ingestion.json`.*
+*Documentation generated on 2026-04-18 from `population_data_ingestion.json`.*

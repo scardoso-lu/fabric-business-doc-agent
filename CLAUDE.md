@@ -5,22 +5,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Running the Agent
 
 ```bash
+# Sync dependencies (first time or after pyproject.toml changes)
+uv sync
+
 # Run against a source directory
-python -m agent.main --src ./src --output ./output
+uv run agent --src ./src --output ./output
 
-# Pipelines only, notebooks only, or specific by name
-python -m agent.main --src ./src --pipelines-only
-python -m agent.main --src ./src --notebooks-only
-python -m agent.main --src ./src --pipeline "pipeline_name"
-python -m agent.main --src ./src --notebook "notebook_name"
+# Pipelines only, notebooks only, dataflows only, or specific by name
+uv run agent --src ./src --pipelines-only
+uv run agent --src ./src --notebooks-only
+uv run agent --src ./src --dataflows-only
+uv run agent --src ./src --pipeline "pipeline_name"
+uv run agent --src ./src --notebook "notebook_name"
+uv run agent --src ./src --dataflow "dataflow_name"
 
-# Windows convenience wrapper (validates Python, installs deps, opens output)
+# Windows/Linux convenience wrappers (sync deps, run agent, open output)
 run.bat [src_dir] [output_dir]
+run.sh  [src_dir] [output_dir]
 ```
 
-Install dependencies: `pip install -r requirements.txt`
+Run the test suite: `uv run pytest`
 
-Run the test suite: `pytest`
+## Prompt Customisation
+
+Every section prompt lives in `prompts.md` at the project root. Edit any `## section_key` block to change what the LLM is asked to produce. The file is read once at startup; missing sections fall back to built-in defaults.
+
+Available section keys: `system_prompt`, `lineage_system_prompt`, `purpose`, `what_it_does`, `flow`, `business_goal`, `data_quality`, `column_lineage`.
+
+Template variables: `{{name}}` (artifact name), `{{content}}` (extracted source data), `{{rag_context}}` (RAG background, empty when RAG is disabled).
+
+Override the file path via `PROMPTS_FILE=./my_prompts.md` in `.env`.
+
+The `agent/prompts.py` module owns loading (`initialise`), retrieval (`get`), and rendering (`render`). Both `LLMClient` and `LocalClaudeClient` call `prompts.render(prompts.get(key), ...)` in every section method.
 
 ## End-to-End Data Flow
 

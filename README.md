@@ -11,7 +11,6 @@ For every pipeline JSON and notebook `.ipynb` file found under the source direct
 | Section | Content |
 | --- | --- |
 | **Purpose** | Why this process exists and what business need it serves |
-| **What It Does** | Start-to-finish description in plain language |
 | **Flow** | Data flow in prose and a Mermaid `flowchart LR` diagram |
 | **Business Goal** | Outcome delivered and what breaks if it stops running |
 | **Data Quality & Alerts** | Validation checks, conditions, and failure paths |
@@ -72,6 +71,22 @@ Select a provider by setting `LLM_PROVIDER` in `.env`.
 | `ollama` | Ollama running locally | Vector + keyword | Embeddings via `nomic-embed-text`; no API key |
 
 The `local` provider uses the [Claude CLI](https://claude.ai/code) already installed on your machine. No external API key or embedding service is needed — the agent passes each artifact's content directly to Claude as a prompt.
+
+---
+
+## Prompt customisation (optional)
+
+Every section prompt is defined in `prompts.md` at the project root. Open the file, edit any `## section_key` block, and the next run will use your version. Sections you leave unchanged keep their built-in defaults.
+
+Available keys: `system_prompt`, `lineage_system_prompt`, `purpose`, `flow`, `business_goal`, `data_quality`, `column_lineage`.
+
+Template variables you can use in any prompt: `{{name}}` (artifact name), `{{content}}` (extracted source data), `{{rag_context}}` (RAG background context).
+
+To use a different file, set `PROMPTS_FILE` in `.env`:
+
+```env
+PROMPTS_FILE=./my_prompts.md
+```
 
 ---
 

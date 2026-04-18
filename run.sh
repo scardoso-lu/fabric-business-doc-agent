@@ -8,9 +8,9 @@ echo " Fabric Business Documentation Agent"
 echo "============================================================"
 echo
 
-# ── 1. Check Python ──────────────────────────────────────────
-if ! command -v python3 &>/dev/null; then
-    echo "[ERROR] python3 not found. Please install Python 3.10+ and add it to PATH."
+# ── 1. Check uv ──────────────────────────────────────────────
+if ! command -v uv &>/dev/null; then
+    echo "[ERROR] uv not found. Install it from https://docs.astral.sh/uv/getting-started/installation/"
     exit 1
 fi
 
@@ -29,9 +29,9 @@ echo " Provider : $LLM_PROVIDER"
 echo " Model    : ${LLM_MODEL:-"(provider default)"}"
 echo
 
-# ── 3. Install / upgrade dependencies ────────────────────────
-echo "[1/3] Installing dependencies..."
-pip install -r requirements.txt -q
+# ── 3. Sync dependencies ──────────────────────────────────────
+echo "[1/3] Syncing dependencies..."
+uv sync -q
 echo "      Done."
 echo
 
@@ -46,11 +46,11 @@ if [[ ! -d "$SRC_DIR" ]]; then
 fi
 
 # ── 5. Run the agent ─────────────────────────────────────────
-echo "[2/3] Scanning \"$SRC_DIR\" for pipelines and notebooks..."
+echo "[2/3] Scanning \"$SRC_DIR\" for pipelines, notebooks, and dataflows..."
 echo "      Output will be written to \"$OUT_DIR\""
 echo
 
-python3 -m agent.main --src "$SRC_DIR" --output "$OUT_DIR"
+uv run agent --src "$SRC_DIR" --output "$OUT_DIR"
 
 # ── 6. Open output folder (best-effort, platform-aware) ──────
 echo

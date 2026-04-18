@@ -17,38 +17,12 @@ from typing import TYPE_CHECKING
 
 from agent.ai.base_client import BaseLLMClient
 from agent.config import EMBEDDING_MODEL, LLM_MODEL, LLM_PROVIDER, OLLAMA_BASE_URL
+from agent.prompts import DEFAULT_LINEAGE_SYSTEM_PROMPT as LINEAGE_SYSTEM_PROMPT
+from agent.prompts import DEFAULT_SYSTEM_PROMPT as SYSTEM_PROMPT
+import agent.prompts as prompts
 
 if TYPE_CHECKING:
     from agent.rag.retriever import RAGRetriever
-
-# ---------------------------------------------------------------------------
-# System prompt — shared across all providers
-# ---------------------------------------------------------------------------
-
-SYSTEM_PROMPT = """You are a business analyst writing internal documentation for non-technical readers (managers, project owners, operations staff).
-
-Goal:
-Explain what the data process does, why it matters, and how it behaves in practical terms.
-
-Style:
-- Use plain English.
-- Write short, clear sentences.
-- Use active voice and present tense.
-- Be specific. Avoid vague phrases like "the process" when a clearer description is possible.
-
-Terminology:
-- Avoid technical or engineering terms.
-- When needed, replace them with simple, concrete language:
-  - "data set" or "data records" instead of technical storage terms
-  - "calculation" or "step" instead of code or system components
-  - "external service" or "data feed" instead of system interfaces
-- If a technical term is necessary for clarity, use it once and briefly explain it.
-
-Structure:
-- Organize the explanation into short paragraphs.
-- Use bullet points only for rules, conditions, or checks.
-- Do not use headings or code blocks unless explicitly requested.
-"""
 
 # ---------------------------------------------------------------------------
 # Default models per provider
@@ -67,12 +41,13 @@ DEFAULT_EMBEDDING_MODELS = {
 
 
 def build_system_prompt() -> str:
-    """Return the system prompt, appending company/project context if CONTEXT_FILE is set."""
+    """Return the active system prompt, appending company/project context if set."""
     from agent.config import CONTEXT_TEXT
+    base = prompts.get("system_prompt")
     if not CONTEXT_TEXT:
-        return SYSTEM_PROMPT
+        return base
     return (
-        f"{SYSTEM_PROMPT}\n"
+        f"{base}\n"
         f"Organisation and project context — use this to make the documentation more specific "
         f"and relevant:\n{CONTEXT_TEXT}\n"
     )
@@ -169,6 +144,30 @@ class LLMClient(BaseLLMClient):
             raw = self._call_openai_compatible(user_message, max_tokens=900)
         return _clean_flow_output(raw)
 
+    def _call_lineage(self, user_message: str) -> str:
+        """Like _call but uses the lineage system prompt and preserves table output."""
+        lineage_sys = prompts.get("lineage_system_prompt")
+        if self._provider == "anthropic":
+            import anthropic as _anthropic
+            response = self._client.messages.create(
+                model=self._model,
+                max_tokens=1800,
+                system=[{"type": "text", "text": lineage_sys, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_message}],
+            )
+            raw = response.content[0].text.strip()
+        else:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                max_tokens=1800,
+                messages=[
+                    {"role": "system", "content": lineage_sys},
+                    {"role": "user", "content": user_message},
+                ],
+            )
+            raw = response.choices[0].message.content.strip()
+        return _clean_lineage_output(raw)
+
     def _call_anthropic(self, user_message: str, max_tokens: int) -> str:
         import anthropic as _anthropic
         response = self._client.messages.create(
@@ -225,69 +224,45 @@ class LLMClient(BaseLLMClient):
 
     def section_purpose(self, name: str, content: str, doc_group: str = "") -> str:
         bg = self._get_rag_context(f"purpose goal {name}", doc_group)
-        prompt = (
-            f"{bg}"
-            f'Explain in plain English why "{name}" exists.\n\n'
-            f"What business problem does it solve? What would be missing if it did not run?\n\n"
-            f"Information:\n{content[:2500]}"
-        )
-        return self._call(prompt, max_tokens=500)
-
-    def section_what_it_does(self, name: str, content: str, doc_group: str = "") -> str:
-        bg = self._get_rag_context(f"steps activities process {name}", doc_group)
-        prompt = (
-            f"{bg}"
-            f'Describe in plain English what "{name}" does from start to finish.\n\n'
-            f"Explain where the data comes from, what happens to it, and what the output is. "
-            f"Focus on the business activity, not the technology.\n\n"
-            f"Information:\n{content[:3000]}"
-        )
-        return self._call(prompt, max_tokens=600)
+        parts = []
+        for template in prompts.get_sub_prompts("purpose"):
+            prompt = prompts.render(template, name=name, content=content[:2500], rag_context=bg)
+            parts.append(self._call(prompt, max_tokens=300))
+        return "\n\n".join(parts)
 
     def section_flow(self, name: str, content: str, doc_group: str = "") -> str:
         bg = self._get_rag_context(f"dependencies connections sources outputs {name}", doc_group)
-        prompt = (
-            f"{bg}"
-            f'Describe the data flow for "{name}": where data comes from, what this process does '
-            f"to it, and where the output goes.\n\n"
-            f"Write at most two short paragraphs in plain business language.\n\n"
-            f"Then produce a Mermaid diagram. Follow this format exactly — no extra text after the diagram:\n\n"
-            f"```mermaid\n"
-            f"flowchart LR\n"
-            f"    SourceSystem[External Source] --> ThisProcess[{name}] --> OutputReport[Downstream Consumer]\n"
-            f"```\n\n"
-            f"Rules for the diagram:\n"
-            f"- Use flowchart LR\n"
-            f"- Label every node in plain English using square brackets: NodeId[Plain English Label]\n"
-            f"- Put real source systems and inputs on the left\n"
-            f"- Put this process in the middle\n"
-            f"- Put real downstream consumers or outputs on the right\n"
-            f"- Use --> for all arrows\n\n"
-            f"Information:\n{content[:2500]}"
-        )
-        return self._call_flow(prompt)
+        parts = []
+        for template in prompts.get_sub_prompts("flow"):
+            prompt = prompts.render(template, name=name, content=content[:2500], rag_context=bg)
+            if "```mermaid" in template:
+                parts.append(self._call_flow(prompt))
+            else:
+                parts.append(self._call(prompt, max_tokens=400))
+        return "\n\n".join(parts)
 
     def section_business_goal(self, name: str, content: str, doc_group: str = "") -> str:
         bg = self._get_rag_context(f"business outcome value {name}", doc_group)
-        prompt = (
-            f"{bg}"
-            f'Describe the business goal and value delivered by "{name}".\n\n'
-            f"What business outcome does it enable? Which teams or decisions depend on it?\n\n"
-            f"Information:\n{content[:2500]}"
-        )
-        return self._call(prompt, max_tokens=500)
+        parts = []
+        for template in prompts.get_sub_prompts("business_goal"):
+            prompt = prompts.render(template, name=name, content=content[:2500], rag_context=bg)
+            parts.append(self._call(prompt, max_tokens=300))
+        return "\n\n".join(parts)
 
     def section_data_quality(self, name: str, content: str, doc_group: str = "") -> str:
         bg = self._get_rag_context(f"validation error handling alerts quality {name}", doc_group)
-        prompt = (
-            f"{bg}"
-            f'Describe the data quality controls and error handling in "{name}".\n\n'
-            f"What checks ensure the data is accurate and complete? "
-            f"What happens when something goes wrong — does the process stop, send an alert, "
-            f"skip bad records, or flag issues for review?\n\n"
-            f"Information:\n{content[:3000]}"
-        )
-        return self._call(prompt, max_tokens=600)
+        parts = []
+        for template in prompts.get_sub_prompts("data_quality"):
+            prompt = prompts.render(template, name=name, content=content[:3000], rag_context=bg)
+            parts.append(self._call(prompt, max_tokens=350))
+        return "\n\n".join(parts)
+
+    def section_column_lineage(self, name: str, content: str, doc_group: str = "") -> str:
+        parts = []
+        for template in prompts.get_sub_prompts("column_lineage"):
+            prompt = prompts.render(template, name=name, content=content[:6000], rag_context="")
+            parts.append(self._call_lineage(prompt))
+        return "\n\n".join(parts)
 
     @property
     def provider(self) -> str:
@@ -354,6 +329,20 @@ def _clean_flow_output(text: str) -> str:
     mermaid_block = re.sub(r"\n{3,}", "\n\n", mermaid_block)
 
     return f"{cleaned_text}\n\n{mermaid_block}".strip() or "Insufficient information available."
+
+
+def _clean_lineage_output(text: str) -> str:
+    """Minimal cleanup for lineage section — preserves markdown tables, headings, and notes."""
+    import re
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            continue
+        lines.append(line)
+    cleaned = "\n".join(lines).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned or "No column lineage detected in this artifact."
 
 
 def _summarise_props(props: dict) -> str:

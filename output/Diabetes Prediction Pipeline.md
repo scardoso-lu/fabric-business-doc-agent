@@ -4,45 +4,72 @@
 | --- | --- |
 | **Type** | Pipeline |
 | **Source file** | `diabetes_prediction_pipeline.json` |
-| **Generated** | 2026-04-17 |
+| **Generated** | 2026-04-18 |
 
 
 ## Purpose
 
-The Diabetes Prediction Pipeline exists so that clinical and operations staff always have an up-to-date forecast of which patients are at risk of developing diabetes. Without it, that risk information would either be absent entirely or based on outdated data, leaving care teams without the early warning they need to intervene before a patient's condition worsens.
-If this process stopped running, the reporting area would no longer receive fresh predictions, and any decisions made from that data â€” staffing, outreach, treatment planning â€” would quietly become unreliable. The built-in failure alert ensures someone is notified immediately if anything goes wrong, so the gap in predictions is caught and corrected rather than going unnoticed.
+This process builds a prediction system for diabetes risk. It uses existing patient data to teach a smart computer model. The goal is to identify which patients are at the highest risk of developing diabetes. This helps healthcare providers focus their
 
-## What It Does
-
-The Diabetes Prediction Pipeline starts by checking whether the prediction model needs to be retrained. If retraining is required, it pulls anonymously available diabetes patient records from a public storage service â€” records that include patient age, sex, BMI, blood pressure, and several clinical measurements. It trains a new model on the majority of those records, then sets a portion aside to test how well the model performs. Once trained, the model is registered so it can be tracked and reused.
-Next, the process validates the test records to confirm they are present and meet a minimum count before proceeding. If the records pass, the model scores each patient record and produces a diabetes risk prediction. Those predictions are then copied into the reporting storage area where managers and analysts can access them. If anything fails at any stage, an external notification service is called automatically to alert the responsible team.
+Insufficient information available.
 
 ## Flow
 
-The Diabetes Prediction Pipeline takes patient test records from a designated data set, validates them for completeness, and then runs them through a prediction process that applies a trained model to estimate diabetes risk. Staff can control which model version to use and whether the model should be retrained before predictions are made.
-Once predictions are generated, the results are copied to the reporting storage area so downstream teams can access them. If anything fails, the pipeline automatically sends an alert to the internal notifications service so the responsible team is informed without delay.
+The Diabetes Prediction Pipeline starts by collecting external patient data for validation and testing. The process first performs several checks to ensure accuracy and readiness. It validates the test data records and confirms the number of records available before proceeding. Based on input settings (ModelVersion and Retrain
+
+Insufficient information available.
 
 ```mermaid
 flowchart LR
-    TestRecords[Patient Test Records] --> Validate[Validate Test Data]
-    Validate --> PredictionProcess[Diabetes Prediction Pipeline]
-    ModelVersion[Model Version Parameter] --> PredictionProcess
-    RetrainFlag[Retrain Model Parameter] --> PredictionProcess
-    PredictionProcess --> ReportingStore[Reporting Storage Area]
-    PredictionProcess --> AlertService[Internal Alert Service]
+    TestInput[Validated Test Data Records] --> DiabetesPipeline[Diabetes Prediction Pipeline];
+    PredictionInput[Generated Prediction Sets] --> DiabetesPipeline;
+    DiabetesPipeline --> ReportOutput[Prediction Report Sink];
+    DiabetesPipeline --> AlertOutput[System Failure Notification];
 ```
 
 ## Business Goal
 
-The Diabetes Prediction Pipeline exists to keep the organisation's diabetes risk assessments current and accurate. It automatically decides whether the underlying prediction model needs refreshing, validates incoming patient records, and â€” once the data passes quality checks â€” produces a fresh set of risk predictions and makes them available to reporting teams. This removes the need for manual intervention in the routine cycle of updating predictions.
-Clinical operations, care management, and any team that uses diabetes risk scores to prioritise patient outreach or resource allocation depend on this process. If it does not run successfully, those teams work from stale or missing risk data, which can delay care decisions. A built-in failure alert ensures the right people are notified immediately if something goes wrong, limiting the window of exposure.
+This pipeline generates predictions to estimate disease risk using historical patient records. It provides healthcare staff with an automated tool to flag individuals who may need early screening or preventative care.
+The process works in several stages, starting with a review of the data itself. First, the system checks if it needs to retrain the prediction model.
+If retraining is required, it executes a step to update the core model using the latest patient data. If the model is already trained and stable, it skips this step.
+The process then validates the current test data records. This step confirms
+
+Insufficient information available.
 
 ## Data Quality & Alerts
 
-The pipeline includes two built-in checkpoints before it does any significant work. First, it checks whether the prediction model actually needs to be updated â€” if the model is already current, the process skips retraining entirely and stops early, avoiding unnecessary work. Second, it checks that enough records arrived from the external data feed before proceeding. If the record count falls short of the expected threshold, the process triggers a follow-up action rather than continuing with incomplete data.
-When something goes wrong, the pipeline does not silently continue. The record count check is designed to catch missing or incomplete data at the source, and the branch structure means the process takes a different path â€” likely pausing or raising an issue â€” rather than producing results based on bad inputs. There is no indication that individual bad records are skipped or flagged one by one; instead, the controls operate at the level of the whole data set. If the data passes both checks, the process runs with a built-in 70/30 split to keep a portion of records separate for validation, and results are logged to an experiment tracker so outcomes can be reviewed and compared over time.
+Insufficient information available.
+
+Insufficient information available.
+
+## Column Lineage
+
+### Bronze → Silver
+| Source | Target Column | Transformation Logic |
+| :--- | :--- | :--- |
+| AGE | AGE | Pass-through (Selected Feature) |
+| SEX | SEX | Pass-through (Selected Feature) |
+| BMI | BMI | Pass-through (Selected Feature) |
+| BP | BP | Pass-through (Selected Feature) |
+| S1 | S1 | Pass-through (Selected Feature) |
+| S2 | S2 | Pass-through (Selected Feature) |
+| S3 | S3 | Pass-through (Selected Feature) |
+| S4 | S4 | Pass-through (Selected Feature) |
+| S5 | S5 | Pass-through (Selected Feature) |
+| S6 | S6 | Pass-through (Selected Feature) |
+
+### Silver → Gold
+| Source | Target Column | Transformation Logic |
+| :--- | :--- | :--- |
+| AGE | Predicted_Y | Used as input feature to calculate the final prediction [^1] |
+| SEX | Predicted_Y | Used as input feature to calculate the final prediction [^1] |
+| BMI | Predicted_Y | Used as input feature to calculate the final prediction [^1] |
+| BP | Predicted_Y | Used as input feature to calculate the final prediction [^1] |
+| S1 | Predicted_Y | Used as input feature to calculate the final prediction [^1] |
+| S2 | Predicted_Y | Used as input feature to calculate the final prediction [^1] |
+| S3 | Predicted_Y | Used as input feature to calculate the final prediction [^1]
 
 
 ---
 
-*Documentation generated on 2026-04-17 from `diabetes_prediction_pipeline.json`.*
+*Documentation generated on 2026-04-18 from `diabetes_prediction_pipeline.json`.*

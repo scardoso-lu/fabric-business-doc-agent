@@ -19,7 +19,8 @@ from typing import TYPE_CHECKING
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
-from agent.config import ACTIVITY_TYPE_LABELS, BRONZE_ACTIVITY_TYPES, SILVER_ACTIVITY_TYPES
+from agent.config import ACTIVITY_TYPE_LABELS, BRONZE_ACTIVITY_TYPES, DATAFLOW_ACTIVITY_TYPES, SILVER_ACTIVITY_TYPES
+from agent.parsers.dataflow_parser import ParsedDataflow
 from agent.parsers.notebook_parser import ParsedNotebook
 from agent.parsers.pipeline_parser import ParsedPipeline, PipelineActivity
 
@@ -34,6 +35,7 @@ class DocGroup:
     group_id: str
     pipeline: ParsedPipeline | None
     notebooks: list[ParsedNotebook] = field(default_factory=list)
+    dataflows: list[ParsedDataflow] = field(default_factory=list)
 
 
 def build_keyword_index(doc_groups: list[DocGroup]) -> dict[str, list[str]]:
@@ -47,6 +49,8 @@ def build_keyword_index(doc_groups: list[DocGroup]) -> dict[str, list[str]]:
             _add_pipeline_chunks(group, documents, metadatas)
         for notebook in group.notebooks:
             _add_notebook_chunks(group.group_id, notebook, documents, metadatas)
+        for dataflow in group.dataflows:
+            _add_dataflow_chunks(group.group_id, dataflow, documents, metadatas)
 
     for doc, meta in zip(documents, metadatas):
         group_id = meta["doc_group"]
@@ -71,6 +75,8 @@ def build_vector_index(doc_groups: list[DocGroup], llm_client: LLMClient) -> Qdr
             _add_pipeline_chunks(group, documents, metadatas)
         for notebook in group.notebooks:
             _add_notebook_chunks(group.group_id, notebook, documents, metadatas)
+        for dataflow in group.dataflows:
+            _add_dataflow_chunks(group.group_id, dataflow, documents, metadatas)
 
     if not documents:
         return None
@@ -160,11 +166,44 @@ def _add_notebook_chunks(
         })
 
 
+def _add_dataflow_chunks(
+    group_id: str,
+    dataflow: ParsedDataflow,
+    documents: list[str],
+    metadatas: list[dict],
+) -> None:
+    documents.append(_sanitize(
+        f"Dataflow: {dataflow.name}\n"
+        f"Description: {dataflow.description or '(none)'}\n"
+        f"Queries: {', '.join(dataflow.query_names)}"
+    ))
+    metadatas.append({
+        "doc_group": group_id,
+        "type": "dataflow_overview",
+        "name": dataflow.name,
+    })
+    for query in dataflow.queries:
+        documents.append(_sanitize(
+            f"Dataflow: {dataflow.name}\n"
+            f"Query: {query.name}\n"
+            f"Description: {query.description or '(none)'}\n"
+            f"M-code: {query.pq_code[:800]}"
+        ))
+        metadatas.append({
+            "doc_group": group_id,
+            "type": "dataflow_query",
+            "name": f"{dataflow.name} / {query.name}",
+            "dataflow_name": dataflow.name,
+        })
+
+
 def _activity_layer(activity: PipelineActivity) -> str:
     if activity.activity_type in BRONZE_ACTIVITY_TYPES:
         return "bronze"
     if activity.activity_type in SILVER_ACTIVITY_TYPES:
         return "silver"
+    if activity.activity_type in DATAFLOW_ACTIVITY_TYPES:
+        return "gold"
     return "control"
 
 

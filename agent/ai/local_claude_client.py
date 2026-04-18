@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import subprocess
 
+import agent.prompts as prompts
 from agent.ai.base_client import BaseLLMClient
-from agent.ai.llm_client import _clean_flow_output, _clean_output, build_system_prompt
+from agent.ai.llm_client import _clean_flow_output, _clean_lineage_output, _clean_output, build_system_prompt
 
 
 class LocalClaudeClient(BaseLLMClient):
@@ -71,57 +72,53 @@ class LocalClaudeClient(BaseLLMClient):
             raise RuntimeError(f"claude CLI exited with code {result.returncode}: {result.stderr.strip()}")
         return _clean_flow_output(result.stdout.strip())
 
+    def _call_lineage(self, user_message: str) -> str:
+        """Uses the lineage system prompt and preserves table output."""
+        full_prompt = f"{prompts.get('lineage_system_prompt')}\n\n{user_message}"
+        result = subprocess.run(
+            ["claude", "-p", full_prompt],
+            capture_output=True,
+            text=True,
+            timeout=self._timeout,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"claude CLI exited with code {result.returncode}: {result.stderr.strip()}")
+        return _clean_lineage_output(result.stdout.strip())
+
     # ------------------------------------------------------------------
     # Section methods — same prompts as LLMClient, no RAG context
     # ------------------------------------------------------------------
 
     def section_purpose(self, name: str, content: str, doc_group: str = "") -> str:
-        return self._call(
-            f'Explain in plain English why "{name}" exists.\n\n'
-            f"What business problem does it solve? What would be missing if it did not run?\n\n"
-            f"Information:\n{content[:2500]}"
-        )
-
-    def section_what_it_does(self, name: str, content: str, doc_group: str = "") -> str:
-        return self._call(
-            f'Describe in plain English what "{name}" does from start to finish.\n\n'
-            f"Explain where the data comes from, what happens to it, and what the output is. "
-            f"Focus on the business activity, not the technology.\n\n"
-            f"Information:\n{content[:3000]}"
-        )
+        parts = []
+        for template in prompts.get_sub_prompts("purpose"):
+            parts.append(self._call(prompts.render(template, name=name, content=content[:2500], rag_context="")))
+        return "\n\n".join(parts)
 
     def section_flow(self, name: str, content: str, doc_group: str = "") -> str:
-        return self._call_flow(
-            f'Describe the data flow for "{name}": where data comes from, what this process does '
-            f"to it, and where the output goes.\n\n"
-            f"Write at most two short paragraphs in plain business language.\n\n"
-            f"Then produce a Mermaid diagram. Follow this format exactly — no extra text after the diagram:\n\n"
-            f"```mermaid\n"
-            f"flowchart LR\n"
-            f"    SourceSystem[External Source] --> ThisProcess[{name}] --> OutputReport[Downstream Consumer]\n"
-            f"```\n\n"
-            f"Rules for the diagram:\n"
-            f"- Use flowchart LR\n"
-            f"- Label every node in plain English using square brackets: NodeId[Plain English Label]\n"
-            f"- Put real source systems and inputs on the left\n"
-            f"- Put this process in the middle\n"
-            f"- Put real downstream consumers or outputs on the right\n"
-            f"- Use --> for all arrows\n\n"
-            f"Information:\n{content[:2500]}"
-        )
+        parts = []
+        for template in prompts.get_sub_prompts("flow"):
+            prompt = prompts.render(template, name=name, content=content[:2500], rag_context="")
+            if "```mermaid" in template:
+                parts.append(self._call_flow(prompt))
+            else:
+                parts.append(self._call(prompt))
+        return "\n\n".join(parts)
 
     def section_business_goal(self, name: str, content: str, doc_group: str = "") -> str:
-        return self._call(
-            f'Describe the business goal and value delivered by "{name}".\n\n'
-            f"What business outcome does it enable? Which teams or decisions depend on it?\n\n"
-            f"Information:\n{content[:2500]}"
-        )
+        parts = []
+        for template in prompts.get_sub_prompts("business_goal"):
+            parts.append(self._call(prompts.render(template, name=name, content=content[:2500], rag_context="")))
+        return "\n\n".join(parts)
 
     def section_data_quality(self, name: str, content: str, doc_group: str = "") -> str:
-        return self._call(
-            f'Describe the data quality controls and error handling in "{name}".\n\n'
-            f"What checks ensure the data is accurate and complete? "
-            f"What happens when something goes wrong — does the process stop, send an alert, "
-            f"skip bad records, or flag issues for review?\n\n"
-            f"Information:\n{content[:3000]}"
-        )
+        parts = []
+        for template in prompts.get_sub_prompts("data_quality"):
+            parts.append(self._call(prompts.render(template, name=name, content=content[:3000], rag_context="")))
+        return "\n\n".join(parts)
+
+    def section_column_lineage(self, name: str, content: str, doc_group: str = "") -> str:
+        parts = []
+        for template in prompts.get_sub_prompts("column_lineage"):
+            parts.append(self._call_lineage(prompts.render(template, name=name, content=content[:6000], rag_context="")))
+        return "\n\n".join(parts)

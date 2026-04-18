@@ -13,6 +13,7 @@ __pycache__/
 .eggs/
 dist/
 build/
+.venv/
 
 # ── Test / tooling ────────────────────────────────────────────
 .pytest_cache/

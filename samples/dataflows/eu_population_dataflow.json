@@ -1,0 +1,28 @@
+{
+  "name": "EU Population Dataflow",
+  "description": "Ingests EU population statistics from the Eurostat public API and transforms them into a reporting-ready gold table, applying country filtering, type casting, and column renaming at each medallion layer.",
+  "properties": {
+    "definition": {
+      "queries": [
+        {
+          "name": "RawEurostatData",
+          "description": "Bronze layer — raw population records fetched directly from the Eurostat JSON API. No filtering or type changes applied.",
+          "queryType": "TableQuery",
+          "pq": "let\n    Source = Json.Document(\n        Web.Contents(\"https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/DEMO_GIND?format=JSON&lang=EN\")\n    ),\n    ValueMap   = Source[value],\n    Dimensions = Source[dimension],\n    TimeLabels = Dimensions[time][category][label],\n    GeoLabels  = Dimensions[geo][category][label],\n    AsTable    = Record.ToTable(ValueMap),\n    RenamedRaw = Table.RenameColumns(AsTable, {{\"Name\", \"RecordKey\"}, {\"Value\", \"RawValue\"}})\nin\n    RenamedRaw"
+        },
+        {
+          "name": "CleanedPopulation",
+          "description": "Silver layer — null rows removed, composite key split into Year and GeoCode, population cast to integer.",
+          "queryType": "TableQuery",
+          "pq": "let\n    Source         = RawEurostatData,\n    FilteredNulls  = Table.SelectRows(Source, each [RawValue] <> null and [RawValue] <> \"\"),\n    SplitKey       = Table.SplitColumn(\n                         FilteredNulls,\n                         \"RecordKey\",\n                         Splitter.SplitTextByDelimiter(\":\", QuoteStyle.Csv),\n                         {\"Year\", \"GeoCode\"}\n                     ),\n    TrimmedText    = Table.TransformColumns(SplitKey, {{\"Year\", Text.Trim}, {\"GeoCode\", Text.Trim}}),\n    TypedColumns   = Table.TransformColumnTypes(TrimmedText, {{\"Year\", Int64.Type}, {\"RawValue\", Int64.Type}}),\n    RenamedValue   = Table.RenameColumns(TypedColumns, {{\"RawValue\", \"Population\"}})\nin\n    RenamedValue"
+        },
+        {
+          "name": "EUPopulationGold",
+          "description": "Gold layer — restricted to EU-27 member states, country name resolved from ISO code, sorted for reporting.",
+          "queryType": "TableQuery",
+          "pq": "let\n    Source        = CleanedPopulation,\n    EUCodes       = {\"AT\",\"BE\",\"BG\",\"CY\",\"CZ\",\"DE\",\"DK\",\"EE\",\"ES\",\"FI\",\n                     \"FR\",\"GR\",\"HR\",\"HU\",\"IE\",\"IT\",\"LT\",\"LU\",\"LV\",\"MT\",\n                     \"NL\",\"PL\",\"PT\",\"RO\",\"SE\",\"SI\",\"SK\"},\n    FilteredEU    = Table.SelectRows(Source, each List.Contains(EUCodes, [GeoCode])),\n    CountryNames  = Table.AddColumn(\n                        FilteredEU,\n                        \"CountryName\",\n                        each Record.FieldOrDefault(\n                            [AT=\"Austria\",BE=\"Belgium\",BG=\"Bulgaria\",CY=\"Cyprus\",\n                             CZ=\"Czechia\",DE=\"Germany\",DK=\"Denmark\",EE=\"Estonia\",\n                             ES=\"Spain\",FI=\"Finland\",FR=\"France\",GR=\"Greece\",\n                             HR=\"Croatia\",HU=\"Hungary\",IE=\"Ireland\",IT=\"Italy\",\n                             LT=\"Lithuania\",LU=\"Luxembourg\",LV=\"Latvia\",MT=\"Malta\",\n                             NL=\"Netherlands\",PL=\"Poland\",PT=\"Portugal\",RO=\"Romania\",\n                             SE=\"Sweden\",SI=\"Slovenia\",SK=\"Slovakia\"],\n                            [GeoCode], [GeoCode]\n                        ),\n                        type text\n                    ),\n    SortedRows     = Table.Sort(CountryNames, {{\"Year\", Order.Descending}, {\"Population\", Order.Descending}}),\n    ReorderedCols  = Table.ReorderColumns(SortedRows, {\"Year\", \"GeoCode\", \"CountryName\", \"Population\"})\nin\n    ReorderedCols"
+        }
+      ]
+    }
+  }
+}

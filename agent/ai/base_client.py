@@ -37,9 +37,6 @@ class BaseLLMClient(ABC):
     def section_purpose(self, name: str, content: str, doc_group: str = "") -> str: ...
 
     @abstractmethod
-    def section_what_it_does(self, name: str, content: str, doc_group: str = "") -> str: ...
-
-    @abstractmethod
     def section_flow(self, name: str, content: str, doc_group: str = "") -> str: ...
 
     @abstractmethod
@@ -47,3 +44,6 @@ class BaseLLMClient(ABC):
 
     @abstractmethod
     def section_data_quality(self, name: str, content: str, doc_group: str = "") -> str: ...
+
+    @abstractmethod
+    def section_column_lineage(self, name: str, content: str, doc_group: str = "") -> str: ...

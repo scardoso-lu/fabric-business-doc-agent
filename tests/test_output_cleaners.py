@@ -1,6 +1,6 @@
 """Tests for _clean_output, _clean_flow_output, and _summarise_props."""
 
-from agent.ai.llm_client import _clean_output, _clean_flow_output, _summarise_props
+from agent.ai.llm_client import _clean_lineage_output, _clean_output, _clean_flow_output, _summarise_props
 
 
 class TestCleanOutput:
@@ -83,6 +83,43 @@ class TestCleanFlowOutput:
         text = f"Text.\n\n```mermaid\nflowchart LR\n\n\n    A --> B\n```"
         result = _clean_flow_output(text)
         assert "\n\n\n" not in result
+
+
+class TestCleanLineageOutput:
+    TABLE = "| Source | Target Column | Transformation Logic |\n| --- | --- | --- |\n| raw_age | AGE | Cast to Integer |"
+
+    def test_preserves_table_rows(self):
+        result = _clean_lineage_output(self.TABLE)
+        assert "| raw_age | AGE | Cast to Integer |" in result
+
+    def test_preserves_section_heading(self):
+        text = "### Bronze → Silver\n\n" + self.TABLE
+        result = _clean_lineage_output(text)
+        assert "### Bronze → Silver" in result
+
+    def test_preserves_no_lineage_message(self):
+        result = _clean_lineage_output("No column lineage detected in this artifact.")
+        assert "No column lineage detected in this artifact." in result
+
+    def test_strips_code_fences(self):
+        text = "```python\nsome code\n```\n" + self.TABLE
+        result = _clean_lineage_output(text)
+        assert "```" not in result
+        assert "| raw_age |" in result
+
+    def test_collapses_excess_blank_lines(self):
+        text = self.TABLE + "\n\n\n\n| b | c | d |"
+        result = _clean_lineage_output(text)
+        assert "\n\n\n" not in result
+
+    def test_preserves_footnote_notes(self):
+        text = self.TABLE + "\n\n**Note 1:** AGE and SEX merged as composite key."
+        result = _clean_lineage_output(text)
+        assert "**Note 1:**" in result
+
+    def test_fallback_when_empty(self):
+        result = _clean_lineage_output("")
+        assert result == "No column lineage detected in this artifact."
 
 
 class TestSummariseProps:
