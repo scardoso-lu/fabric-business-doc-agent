@@ -1,0 +1,197 @@
+{
+  "name": "Population Data Refresh Notification",
+  "properties": {
+    "displayName": "Population Data Refresh Notification",
+    "description": "Notifies business stakeholders when the EU Population Data Ingestion pipeline completes or fails. Triggered by a pipeline webhook, routes alerts to Microsoft Teams and email, logs every run to SharePoint, and raises a Planner task for failures.",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "triggers": {
+        "Pipeline_webhook": {
+          "type": "Request",
+          "kind": "Http",
+          "description": "Receives an HTTP POST from the Fabric pipeline when the EU Population Data Ingestion run finishes. The payload contains the pipeline name, run status, start/end times, and any error message."
+        }
+      },
+      "actions": {
+        "Parse_pipeline_result": {
+          "type": "ParseJson",
+          "runAfter": {},
+          "description": "Extracts the pipeline name, status, start time, end time, run ID, and error message from the incoming webhook payload.",
+          "inputs": {
+            "content": "@triggerBody()",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "pipelineName": { "type": "string" },
+                "status":       { "type": "string" },
+                "startTime":    { "type": "string", "format": "date-time" },
+                "endTime":      { "type": "string", "format": "date-time" },
+                "runId":        { "type": "string" },
+                "errorMessage": { "type": "string" }
+              }
+            }
+          }
+        },
+        "Check_run_status": {
+          "type": "Condition",
+          "runAfter": { "Parse_pipeline_result": ["Succeeded"] },
+          "description": "Routes the notification to the success or failure branch based on the pipeline run status reported in the webhook payload.",
+          "expression": {
+            "equals": [
+              "@body('Parse_pipeline_result')?['status']",
+              "Succeeded"
+            ]
+          },
+          "actions": {
+            "Post_success_to_Teams": {
+              "type": "OpenApiConnection",
+              "runAfter": {},
+              "description": "Posts a success card to the Analytics Notifications Teams channel so stakeholders know the population data is ready.",
+              "inputs": {
+                "host": {
+                  "connectionName": "shared_teams",
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_teams"
+                },
+                "method": "post",
+                "path": "/v1.0/teams/Analytics%20Notifications/channels/General/messages",
+                "body": {
+                  "messageBody": "<b>✅ EU Population Data Refresh Complete</b><br>Pipeline: @{body('Parse_pipeline_result')?['pipelineName']}<br>Finished: @{body('Parse_pipeline_result')?['endTime']}<br>Run ID: @{body('Parse_pipeline_result')?['runId']}<br><br>The Population table is up to date and reports are ready for use."
+                }
+              }
+            },
+            "Send_success_email": {
+              "type": "OpenApiConnection",
+              "runAfter": { "Post_success_to_Teams": ["Succeeded"] },
+              "description": "Emails the analytics stakeholders list to confirm the latest EU population projection data is available in the reporting lakehouse.",
+              "inputs": {
+                "host": {
+                  "connectionName": "shared_office365",
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
+                },
+                "method": "post",
+                "path": "/v2/Mail",
+                "body": {
+                  "To": "analytics-stakeholders@example.com",
+                  "Subject": "EU Population Data Refreshed — @{body('Parse_pipeline_result')?['endTime']}",
+                  "Body": "The EU Population Data Ingestion pipeline completed successfully.\n\nThe Population table has been updated with the latest Eurostat projection data. All downstream reports and dashboards now reflect current figures.\n\nRun ID: @{body('Parse_pipeline_result')?['runId']}",
+                  "Importance": "Normal"
+                }
+              }
+            }
+          },
+          "else": {
+            "actions": {
+              "Post_failure_alert_to_Teams": {
+                "type": "OpenApiConnection",
+                "runAfter": {},
+                "description": "Posts an urgent failure alert to the Data Engineering Teams channel with the error details so the on-call engineer can begin investigation immediately.",
+                "inputs": {
+                  "host": {
+                    "connectionName": "shared_teams",
+                    "apiId": "/providers/Microsoft.PowerApps/apis/shared_teams"
+                  },
+                  "method": "post",
+                  "path": "/v1.0/teams/Data%20Engineering/channels/Alerts/messages",
+                  "body": {
+                    "messageBody": "<b>❌ EU Population Data Refresh Failed</b><br>Pipeline: @{body('Parse_pipeline_result')?['pipelineName']}<br>Error: @{body('Parse_pipeline_result')?['errorMessage']}<br>Run ID: @{body('Parse_pipeline_result')?['runId']}<br><br>Please investigate immediately."
+                  }
+                }
+              },
+              "Send_failure_alert_email": {
+                "type": "OpenApiConnection",
+                "runAfter": { "Post_failure_alert_to_Teams": ["Succeeded"] },
+                "description": "Sends a high-priority alert email to the data engineering lead and on-call engineer with the full error details.",
+                "inputs": {
+                  "host": {
+                    "connectionName": "shared_office365",
+                    "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365"
+                  },
+                  "method": "post",
+                  "path": "/v2/Mail",
+                  "body": {
+                    "To": "data-engineering-lead@example.com;oncall@example.com",
+                    "Subject": "⚠️ ALERT: EU Population Data Pipeline Failed",
+                    "Body": "The EU Population Data Ingestion pipeline has failed and requires immediate attention.\n\nError: @{body('Parse_pipeline_result')?['errorMessage']}\nRun ID: @{body('Parse_pipeline_result')?['runId']}\nStarted: @{body('Parse_pipeline_result')?['startTime']}\n\nPopulation data in the reporting lakehouse may be stale. Downstream reports could be affected.",
+                    "Importance": "High"
+                  }
+                }
+              },
+              "Create_incident_task": {
+                "type": "OpenApiConnection",
+                "runAfter": { "Send_failure_alert_email": ["Succeeded"] },
+                "description": "Creates a Planner task in the Data Engineering Incidents bucket so the failure is tracked and assigned for resolution.",
+                "inputs": {
+                  "host": {
+                    "connectionName": "shared_planner",
+                    "apiId": "/providers/Microsoft.PowerApps/apis/shared_tasks"
+                  },
+                  "method": "post",
+                  "path": "/v1/tasks",
+                  "body": {
+                    "title": "Investigate: EU Population Pipeline Failure — @{body('Parse_pipeline_result')?['runId']}",
+                    "bucketId": "data-engineering-incidents",
+                    "dueDateTime": "@{addDays(utcNow(), 1)}",
+                    "notes": "@{body('Parse_pipeline_result')?['errorMessage']}"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "Log_run_to_SharePoint": {
+          "type": "OpenApiConnection",
+          "runAfter": { "Check_run_status": ["Succeeded", "Failed"] },
+          "description": "Records the pipeline run outcome — success or failure — in the Data Ops SharePoint list so there is a permanent audit trail of all refresh attempts.",
+          "inputs": {
+            "host": {
+              "connectionName": "shared_sharepointonline",
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline"
+            },
+            "method": "post",
+            "path": "/datasets/@{encodeURIComponent('https://example.sharepoint.com/sites/DataOps')}/tables/@{encodeURIComponent('Pipeline Run Log')}/items",
+            "body": {
+              "Title":   "@{body('Parse_pipeline_result')?['pipelineName']}",
+              "Status":  "@{body('Parse_pipeline_result')?['status']}",
+              "RunDate": "@{body('Parse_pipeline_result')?['endTime']}",
+              "RunID":   "@{body('Parse_pipeline_result')?['runId']}"
+            }
+          }
+        }
+      }
+    },
+    "connectionReferences": {
+      "shared_teams": {
+        "runtimeSource": "embedded",
+        "connection": { "connectionReferenceLogicalName": "shared_teams" },
+        "api": {
+          "name": "shared_teams",
+          "displayName": "Microsoft Teams"
+        }
+      },
+      "shared_office365": {
+        "runtimeSource": "embedded",
+        "connection": { "connectionReferenceLogicalName": "shared_office365" },
+        "api": {
+          "name": "shared_office365",
+          "displayName": "Office 365 Outlook"
+        }
+      },
+      "shared_sharepointonline": {
+        "runtimeSource": "embedded",
+        "connection": { "connectionReferenceLogicalName": "shared_sharepointonline" },
+        "api": {
+          "name": "shared_sharepointonline",
+          "displayName": "SharePoint"
+        }
+      },
+      "shared_planner": {
+        "runtimeSource": "embedded",
+        "connection": { "connectionReferenceLogicalName": "shared_planner" },
+        "api": {
+          "name": "shared_planner",
+          "displayName": "Microsoft Planner"
+        }
+      }
+    }
+  }
+}
