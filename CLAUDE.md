@@ -11,13 +11,15 @@ uv sync
 # Run against a source directory
 uv run agent --src ./src --output ./output
 
-# Pipelines only, notebooks only, dataflows only, or specific by name
+# Filter by type or name
 uv run agent --src ./src --pipelines-only
 uv run agent --src ./src --notebooks-only
 uv run agent --src ./src --dataflows-only
+uv run agent --src ./src --powerautomate-only
 uv run agent --src ./src --pipeline "pipeline_name"
 uv run agent --src ./src --notebook "notebook_name"
 uv run agent --src ./src --dataflow "dataflow_name"
+uv run agent --src ./src --powerautomate "flow_name"
 
 # Windows/Linux convenience wrappers (sync deps, run agent, open output)
 run.bat [src_dir] [output_dir]
@@ -30,7 +32,7 @@ Run the test suite: `uv run pytest`
 
 Every section prompt lives in `prompts.md` at the project root. Edit any `## section_key` block to change what the LLM is asked to produce. The file is read once at startup; missing sections fall back to built-in defaults.
 
-Available section keys: `system_prompt`, `lineage_system_prompt`, `purpose`, `what_it_does`, `flow`, `business_goal`, `data_quality`, `column_lineage`.
+Available section keys: `system_prompt`, `lineage_system_prompt`, `purpose`, `flow`, `business_goal`, `data_quality`, `column_lineage`.
 
 Template variables: `{{name}}` (artifact name), `{{content}}` (extracted source data), `{{rag_context}}` (RAG background, empty when RAG is disabled).
 
@@ -46,9 +48,12 @@ GITHUB_REPO_URL set?
 
 main.py
   ├─ Clears output/*.md
-  ├─ Discovers *.json pipelines + *.ipynb notebooks under --src
-  ├─ Parses all notebooks (notebook_map)
-  ├─ Parses all pipelines → resolves linked notebooks → identifies orphan notebooks
+  ├─ Reads ARTIFACT_TYPES from config (default: pipeline,notebook,dataflow)
+  ├─ CLI *-only flags further restrict which types are scanned for this run
+  ├─ Discovers files for each enabled type (parsers injected via parser_registry)
+  ├─ Parses all notebooks (notebook_map) and dataflows (dataflow_map)
+  ├─ Parses all pipelines → resolves linked notebooks/dataflows → identifies orphans
+  ├─ Discovers and parses Power Automate flows (via _PowerAutomateParser)
   ├─ create_client() → returns LocalClaudeClient or LLMClient based on LLM_PROVIDER
   ├─ Builds RAG index (skipped when client.supports_rag is False)
   │     ├─ build_keyword_index() — always, all providers
@@ -56,7 +61,9 @@ main.py
   │         → RAGRetriever: vector search with keyword fallback
   ├─ For each pipeline → generate_pipeline_doc() → writes {name}.md
   ├─ For each orphan notebook → generate_notebook_doc() → writes {name}.md
-  └─ PUBLISH_WIKI=true → WikiPublisher.publish() pushes each .md to Azure DevOps wiki
+  ├─ For each orphan dataflow → generate_dataflow_doc() → writes {name}.md
+  ├─ For each Power Automate flow → generate_powerautomate_doc() → writes {name}.md
+  └─ PUBLISH_WIKI=true → WikiPublisher.publish() pushes each .md to wiki
 ```
 
 ## Document Structure
@@ -66,12 +73,12 @@ Every output file — pipeline or notebook — produces the **same five sections
 | Section | Content |
 |---|---|
 | **Purpose** | Why this process exists; what business need it serves |
-| **What It Does** | Start-to-finish description in plain language |
 | **Flow** | Data flow as prose (max 2 paragraphs) + a Mermaid `flowchart LR` diagram |
 | **Business Goal** | Outcome delivered; what breaks if it doesn't run |
 | **Data Quality & Alerts** | Validation checks and rules (may use bullet lists) |
+| **Column Lineage** | Column-by-column mapping from bronze source to gold output |
 
-Each section is a separate LLM call with tailored content. `doc_generator._pipeline_contents()` and `_notebook_contents()` build five different context strings (one per section) so each call receives only the most relevant information.
+Each section is a separate LLM call with tailored content. `doc_generator._pipeline_contents()` and `_notebook_contents()` build context strings (one per section) so each call receives only the most relevant information.
 
 **Formatting rules enforced via system prompt:**
 - Short paragraphs; plain English; active voice; present tense
@@ -120,6 +127,7 @@ All settings via `.env` (copy from `.env.example`):
 
 | Variable | Default | Notes |
 |---|---|---|
+| `ARTIFACT_TYPES` | `pipeline,notebook,dataflow` | Comma-separated artifact types to scan; add `powerautomate` to include Power Automate flows |
 | `LLM_PROVIDER` | `anthropic` | `anthropic`, `openai`, `ollama`, or `local` |
 | `LLM_MODEL` | provider default | `claude-sonnet-4-6` / `gpt-4o-mini` / `llama3.2` / ignored for `local` |
 | `ANTHROPIC_API_KEY` | — | Required for `anthropic` |
@@ -136,9 +144,22 @@ All settings via `.env` (copy from `.env.example`):
 | `AZDO_PAT` | — | Personal Access Token with Wiki read/write scope (required when `PUBLISH_WIKI=true`) |
 | `AZDO_WIKI_PATH_PREFIX` | — | Optional path prefix, e.g. `/Fabric Docs` |
 
+## Parser Dependency Injection
+
+Artifact parsers are registered in `agent/parsers/parser_registry.py`. Each parser wraps the existing `find_*` and `parse_*` functions behind the `ArtifactParser` interface (`base_parser.py`). To add a new artifact type:
+
+1. Create a parser class in `agent/parsers/<type>_parser.py`.
+2. Add a subclass of `ArtifactParser` to `parser_registry.py` and register it in `_REGISTRY`.
+3. Add a generator function in `agent/generators/doc_generator.py`.
+4. Add a generation loop in `agent/main.py` following the Power Automate pattern.
+5. Document the new type name in `ARTIFACT_TYPES` in `.env.example`.
+
+The `ARTIFACT_TYPES` env var (comma-separated) controls which types are scanned. CLI `--<type>-only` flags further restrict the set for a single run.
+
 ## Key Design Decisions
 
 - **Dependency injection for LLM clients**: `create_client()` is the single entry point. `main.py` only depends on `BaseLLMClient`; no provider-specific code leaks outside the `agent/ai/` module.
+- **Dependency injection for parsers**: `get_parser()` / `get_enabled_parsers()` in `parser_registry.py` is the single entry point for artifact discovery. `main.py` uses `get_parser("powerautomate")` for Power Automate; existing Fabric types keep their direct function calls for backward compatibility.
 - **Notebook linking**: Notebooks referenced by a pipeline (`TridentNotebook`/`Notebook` activity type) are consumed by that pipeline's doc and do **not** get a standalone file. Orphan notebooks (unreferenced) get their own file.
 - **Output cleanup**: `_clean_output()` in `llm_client.py` strips common LLM artefacts (echoed instructions, code fences, meta-comments). `_clean_flow_output()` is the variant that preserves the mermaid block.
 - **Section-specific content**: Each of the 5 LLM calls receives a different slice of the parsed data — e.g. quality checks get control-flow and fail activities; the Flow section gets external source configs and linked notebook names.

@@ -56,9 +56,15 @@ Structure:
 ## lineage_system_prompt
 
 > **Role**: The LLM persona used exclusively for the Column Lineage section.
-> Controls how column-level transformations are extracted and formatted.
+> Controls scope (persisted tables only, no temp objects) and output format.
 
 You are a data lineage analyst. Extract column-level data lineage from the code provided.
+
+Scope — only document tables that are written to persistent storage (data lake, lakehouse, or data warehouse):
+- PySpark / Python: tables written with df.write.saveAsTable(), df.write.format(...).save(...), spark.sql("CREATE TABLE ..."), COPY INTO, or equivalent.
+- SQL: permanent tables created or populated with CREATE TABLE, INSERT INTO, MERGE INTO, or SELECT INTO (not #temp, @variable, or CTE results).
+- Power Query (M-code): only queries that are loaded to a destination (final output queries); skip intermediate helper queries that are only referenced by other queries.
+- Exclude entirely: temporary tables (prefixed #, tmp_, temp_, or @), staging objects used only within the same script, in-memory DataFrames that are never persisted, CTEs, and subqueries.
 
 Output rules (follow exactly):
 - Produce one Markdown table per layer pair, working backwards from gold to bronze.
@@ -68,7 +74,7 @@ Output rules (follow exactly):
 - "Target Column" = destination column name.
 - "Transformation Logic" = a brief, plain-English description of what changes (e.g., "Cast to Integer", "Multiplied by tax rate", "Concatenated with separator", "Pass-through", "Derived from ML model output").
 - When multiple source columns are combined into one target column, append a footnote marker [^N] to the Transformation Logic cell and add a **Note N:** line after the table explaining the merge rule.
-- If the code does not contain clear column-level transformations, return this exact string: No column lineage detected in this artifact.
+- If no persisted tables with detectable column-level transformations are found, return this exact string: No column lineage detected in this artifact.
 - Do not output any introductory text, prose explanations, or commentary outside of tables and notes.
 
 ---
@@ -94,8 +100,9 @@ Information:
 
 ## flow
 
-> **Section**: Flow — *Data flow in prose and a Mermaid `flowchart LR` diagram.*
-> Two sub-prompts: prose description first, then the Mermaid diagram.
+> **Section**: Flow — *High-level prose overview, a Mermaid `flowchart LR` diagram (macro view),*
+> *and a numbered pseudo-code walkthrough (detailed view).*
+> Three sub-prompts: prose description, then the Mermaid diagram, then the pseudo-code steps.
 
 {{rag_context}}In at most two short paragraphs, describe the data flow for "{{name}}": where data comes from, what this process does to it, and where the output goes. Use plain business language.
 
@@ -124,6 +131,21 @@ Information:
 
 ---
 
+List the steps of "{{name}}" as a numbered pseudo-code walkthrough in plain English.
+
+Rules:
+- One line per step.
+- Use two-space indentation for sub-steps inside loops, conditions, or branches.
+- Label branches clearly (e.g. "If the file is empty:", "On failure:").
+- Use plain business language — no programming syntax.
+- Each step should say what it receives or checks, what it does, and what it produces or passes on.
+- Precede the list with the bold heading **Steps:**
+
+Information:
+{{content}}
+
+---
+
 ## business_goal
 
 > **Section**: Business Goal — *Outcome delivered and what breaks if it stops running.*
@@ -145,17 +167,26 @@ Information:
 
 ## data_quality
 
-> **Section**: Data Quality & Alerts — *Validation checks, conditions, and failure paths.*
-> Two sub-prompts: what is checked, then what happens on failure.
+> **Section**: Data Quality & Alerts — *Validation checks, error handling, and external notifications.*
+> Two sub-prompts: what is validated, then how failures and alerts are handled.
+> The second sub-prompt specifically asks the LLM to look for raise/exception statements,
+> if/else failure branches, and external notification calls (email, log, webhook, Teams, Slack).
 
-{{rag_context}}What validation checks does "{{name}}" apply to ensure the data is accurate and complete? List the specific rules or conditions checked.
+{{rag_context}}What validation checks, filters, or conditional logic does "{{name}}" apply to ensure the data is accurate and complete? List the specific rules, conditions, or thresholds checked.
 
 Information:
 {{content}}
 
 ---
 
-What happens when a data quality check fails in "{{name}}"? Does the process stop, send an alert, skip bad records, or flag issues for review?
+What happens when something goes wrong in "{{name}}"? Look for:
+- Exceptions or errors that are raised (raise statements, Fail activities, error conditions)
+- If/else or Switch branches that handle bad data or failures
+- External notifications triggered on failure: log messages, email alerts, webhook calls, Teams or Slack messages, API calls to monitoring systems
+
+For each pattern found, describe: what condition triggers it, what the response is, and where the notification goes (recipient, log target, endpoint) if it can be identified from the code.
+
+If no external alerting is found, state the fallback behaviour (stops silently, propagates the error, skips bad records, and so on).
 
 Information:
 {{content}}

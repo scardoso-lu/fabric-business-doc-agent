@@ -28,7 +28,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 import agent.prompts as prompts
 from agent.ai.client_factory import create_client
-from agent.config import CONTEXT_FILE, CONTEXT_TEXT, GITHUB_REPO_URL, OUTPUT_DIR, PROMPTS_FILE, PUBLISH_WIKI, SRC_DIR
+from agent.config import ARTIFACT_TYPES, CONTEXT_FILE, CONTEXT_TEXT, GITHUB_REPO_URL, OUTPUT_DIR, PROMPTS_FILE, PUBLISH_WIKI, SRC_DIR
 from agent.git_cloner import clone_repo
 from agent.rag.indexer import DocGroup, build_keyword_index, build_vector_index
 from agent.rag.retriever import RAGRetriever
@@ -36,12 +36,15 @@ from agent.generators.doc_generator import (
     generate_dataflow_doc,
     generate_notebook_doc,
     generate_pipeline_doc,
+    generate_powerautomate_doc,
     get_linked_dataflows,
     get_linked_notebooks,
 )
 from agent.parsers.dataflow_parser import ParsedDataflow, find_dataflow_files, parse_dataflow_file
 from agent.parsers.notebook_parser import ParsedNotebook, find_notebook_files, parse_notebook_file
 from agent.parsers.pipeline_parser import find_pipeline_files, parse_pipeline_file
+from agent.parsers.parser_registry import get_parser
+from agent.parsers.powerautomate_parser import ParsedPowerAutomateFlow
 from agent.publishers.base_wiki_publisher import BaseWikiPublisher
 from agent.publishers.wiki_factory import create_wiki_publisher
 
@@ -68,6 +71,7 @@ console = Console()
 @click.option("--pipelines-only", is_flag=True, default=False, help="Only process pipeline JSON files.")
 @click.option("--notebooks-only", is_flag=True, default=False, help="Only process notebook .ipynb files.")
 @click.option("--dataflows-only", is_flag=True, default=False, help="Only process Dataflow Gen2 files.")
+@click.option("--powerautomate-only", is_flag=True, default=False, help="Only process Power Automate flow files.")
 @click.option(
     "--pipeline",
     "pipeline_filter",
@@ -86,15 +90,23 @@ console = Console()
     default=None,
     help="Process only the dataflow whose name matches this value.",
 )
+@click.option(
+    "--powerautomate",
+    "powerautomate_filter",
+    default=None,
+    help="Process only the Power Automate flow whose file stem matches this value.",
+)
 def main(
     src_dir: Path,
     output_dir: Path,
     pipelines_only: bool,
     notebooks_only: bool,
     dataflows_only: bool,
+    powerautomate_only: bool,
     pipeline_filter: str | None,
     notebook_filter: str | None,
     dataflow_filter: str | None,
+    powerautomate_filter: str | None,
 ) -> None:
     console.print(Panel.fit("[bold cyan]Fabric Business Documentation Agent[/bold cyan]"))
 
@@ -141,10 +153,25 @@ def main(
 
     # ------------------------------------------------------------------
     # Discover source files
+    # Enabled types come from ARTIFACT_TYPES in .env; CLI *-only flags
+    # further restrict the set for a single run.
     # ------------------------------------------------------------------
-    scan_pipelines  = not notebooks_only and not dataflows_only
-    scan_notebooks  = not pipelines_only and not dataflows_only
-    scan_dataflows  = not pipelines_only and not notebooks_only
+    enabled_types = set(ARTIFACT_TYPES)
+    any_only = pipelines_only or notebooks_only or dataflows_only or powerautomate_only
+    if any_only:
+        requested: set[str] = set()
+        if pipelines_only:      requested.add("pipeline")
+        if notebooks_only:      requested.add("notebook")
+        if dataflows_only:      requested.add("dataflow")
+        if powerautomate_only:  requested.add("powerautomate")
+        scan_types = enabled_types & requested
+    else:
+        scan_types = enabled_types
+
+    scan_pipelines      = "pipeline"      in scan_types
+    scan_notebooks      = "notebook"      in scan_types
+    scan_dataflows      = "dataflow"      in scan_types
+    scan_powerautomate  = "powerautomate" in scan_types
 
     notebook_files = find_notebook_files(src_dir) if scan_notebooks else []
     pipeline_files = find_pipeline_files(src_dir) if scan_pipelines else []
@@ -157,13 +184,25 @@ def main(
     if dataflow_filter:
         dataflow_files = [f for f in dataflow_files if f.stem == dataflow_filter]
 
+    # Power Automate — discovered via parser registry
+    powerautomate_map: dict[str, ParsedPowerAutomateFlow] = {}
+    if scan_powerautomate:
+        pa_parser = get_parser("powerautomate")
+        if pa_parser:
+            for pa_path in pa_parser.find_files(src_dir, name_filter=powerautomate_filter):
+                flow = pa_parser.parse(pa_path)
+                if flow:
+                    powerautomate_map[flow.name] = flow
+
+    pa_count = len(powerautomate_map)
     console.print(
         f"Found [bold]{len(pipeline_files)}[/bold] pipeline(s), "
-        f"[bold]{len(notebook_files)}[/bold] notebook(s), and "
-        f"[bold]{len(dataflow_files)}[/bold] dataflow(s) under [italic]{src_dir}[/italic]"
+        f"[bold]{len(notebook_files)}[/bold] notebook(s), "
+        f"[bold]{len(dataflow_files)}[/bold] dataflow(s), and "
+        f"[bold]{pa_count}[/bold] Power Automate flow(s) under [italic]{src_dir}[/italic]"
     )
 
-    if not pipeline_files and not notebook_files and not dataflow_files:
+    if not pipeline_files and not notebook_files and not dataflow_files and not powerautomate_map:
         console.print("[yellow]Nothing to process. Exiting.[/yellow]")
         sys.exit(0)
 
@@ -215,7 +254,8 @@ def main(
         f"{len(linked_notebooks)} linked notebook(s) · "
         f"{len(orphan_notebooks)} orphan notebook(s) · "
         f"{len(linked_dataflows)} linked dataflow(s) · "
-        f"{len(orphan_dataflows)} orphan dataflow(s)\n"
+        f"{len(orphan_dataflows)} orphan dataflow(s) · "
+        f"{pa_count} Power Automate flow(s)\n"
     )
 
     # ------------------------------------------------------------------
@@ -250,6 +290,8 @@ def main(
             doc_groups.append(DocGroup(group_id=nb_name, pipeline=None, notebooks=[nb]))
         for df_name, df in orphan_dataflows.items():
             doc_groups.append(DocGroup(group_id=df_name, pipeline=None, dataflows=[df]))
+        for flow_name, flow in powerautomate_map.items():
+            doc_groups.append(DocGroup(group_id=flow_name, flows=[flow]))
 
         console.print("[bold]Building RAG index…[/bold]")
 
@@ -388,6 +430,37 @@ def main(
             "\n[dim]All dataflows are linked to pipelines — "
             "no standalone dataflow docs generated.[/dim]"
         )
+
+    # ------------------------------------------------------------------
+    # Process Power Automate flows
+    # ------------------------------------------------------------------
+    if powerautomate_map:
+        console.print("\n[bold]Generating Power Automate flow documentation…[/bold]")
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Processing…", total=len(powerautomate_map))
+            for flow_name, flow in powerautomate_map.items():
+                progress.update(task, description=f"Flow: [cyan]{flow_name}[/cyan]")
+                try:
+                    if wiki and wiki.page_exists(flow_name):
+                        console.print(f"  [dim]⏭  {flow_name} — wiki page exists, skipping.[/dim]")
+                        continue
+                    markdown = generate_powerautomate_doc(flow, client)
+                    out_path = output_dir / f"{flow_name}.md"
+                    out_path.write_text(markdown, encoding="utf-8")
+                    msg = f"  [green]✓[/green] {out_path.name}"
+                    if wiki:
+                        url = wiki.publish(flow_name, markdown)
+                        msg += f" → [dim]{url}[/dim]"
+                    console.print(msg)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"Error generating docs for Power Automate flow {flow_name}: {exc}")
+                finally:
+                    progress.advance(task)
 
     # ------------------------------------------------------------------
     # Summary

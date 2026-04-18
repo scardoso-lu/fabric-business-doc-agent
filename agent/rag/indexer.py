@@ -23,6 +23,7 @@ from agent.config import ACTIVITY_TYPE_LABELS, BRONZE_ACTIVITY_TYPES, DATAFLOW_A
 from agent.parsers.dataflow_parser import ParsedDataflow
 from agent.parsers.notebook_parser import ParsedNotebook
 from agent.parsers.pipeline_parser import ParsedPipeline, PipelineActivity
+from agent.parsers.powerautomate_parser import ParsedPowerAutomateFlow
 
 if TYPE_CHECKING:
     from agent.ai.llm_client import LLMClient
@@ -33,9 +34,10 @@ COLLECTION = "fabric_docs"
 @dataclass
 class DocGroup:
     group_id: str
-    pipeline: ParsedPipeline | None
+    pipeline: ParsedPipeline | None = None
     notebooks: list[ParsedNotebook] = field(default_factory=list)
     dataflows: list[ParsedDataflow] = field(default_factory=list)
+    flows: list[ParsedPowerAutomateFlow] = field(default_factory=list)
 
 
 def build_keyword_index(doc_groups: list[DocGroup]) -> dict[str, list[str]]:
@@ -51,6 +53,8 @@ def build_keyword_index(doc_groups: list[DocGroup]) -> dict[str, list[str]]:
             _add_notebook_chunks(group.group_id, notebook, documents, metadatas)
         for dataflow in group.dataflows:
             _add_dataflow_chunks(group.group_id, dataflow, documents, metadatas)
+        for flow in group.flows:
+            _add_powerautomate_chunks(group.group_id, flow, documents, metadatas)
 
     for doc, meta in zip(documents, metadatas):
         group_id = meta["doc_group"]
@@ -77,6 +81,8 @@ def build_vector_index(doc_groups: list[DocGroup], llm_client: LLMClient) -> Qdr
             _add_notebook_chunks(group.group_id, notebook, documents, metadatas)
         for dataflow in group.dataflows:
             _add_dataflow_chunks(group.group_id, dataflow, documents, metadatas)
+        for flow in group.flows:
+            _add_powerautomate_chunks(group.group_id, flow, documents, metadatas)
 
     if not documents:
         return None
@@ -194,6 +200,40 @@ def _add_dataflow_chunks(
             "type": "dataflow_query",
             "name": f"{dataflow.name} / {query.name}",
             "dataflow_name": dataflow.name,
+        })
+
+
+def _add_powerautomate_chunks(
+    group_id: str,
+    flow: ParsedPowerAutomateFlow,
+    documents: list[str],
+    metadatas: list[dict],
+) -> None:
+    connections = ", ".join(flow.connections) if flow.connections else "(none)"
+    documents.append(_sanitize(
+        f"Power Automate Flow: {flow.name}\n"
+        f"Description: {flow.description or '(none)'}\n"
+        f"Trigger: {flow.trigger_summary or '(none)'}\n"
+        f"Connected services: {connections}"
+    ))
+    metadatas.append({
+        "doc_group": group_id,
+        "type": "powerautomate_overview",
+        "name": flow.name,
+    })
+    for action in flow.actions:
+        documents.append(_sanitize(
+            f"Flow: {flow.name}\n"
+            f"Action: {action.name}\n"
+            f"Type: {action.type}\n"
+            f"Connector: {action.connection or '(none)'}\n"
+            f"Description: {action.description or '(none)'}"
+        ))
+        metadatas.append({
+            "doc_group": group_id,
+            "type": "powerautomate_action",
+            "name": f"{flow.name} / {action.name}",
+            "flow_name": flow.name,
         })
 
 

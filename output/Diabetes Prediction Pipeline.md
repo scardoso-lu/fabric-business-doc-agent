@@ -9,30 +9,47 @@
 
 ## Purpose
 
-This process builds a prediction system for diabetes risk. It uses existing patient data to teach a smart computer model. The goal is to identify which patients are at the highest risk of developing diabetes. This helps healthcare providers focus their
+This pipeline uses historical patient data to create and test a predictive tool for diabetes. It helps clinical staff identify patients who might be at high risk, allowing them to intervene with preventative care.
+The process reviews the latest diabetes patient records to ensure accurate predictions. First, the system checks if the prediction model needs retraining based on the current model version. If retraining is necessary, the system runs a comprehensive training step, creating and saving a new, improved model.
+Before generating predictions
 
-Insufficient information available.
+The business loses its ability to generate current, data-driven risk assessments for potential diabetes cases.
 
 ## Flow
 
-The Diabetes Prediction Pipeline starts by collecting external patient data for validation and testing. The process first performs several checks to ensure accuracy and readiness. It validates the test data records and confirms the number of records available before proceeding. Based on input settings (ModelVersion and Retrain
+The Diabetes Prediction Pipeline starts by pulling necessary patient information. It uses a current trained model and specific input data to ensure results are accurate. First, the process checks if the predictive model needs to be updated or retrained. If required, the pipeline trains a new prediction model using historical patient records. After training, the process validates the current test data records to ensure they meet quality standards.
+The core function of the pipeline is generating predictions. It takes the validated test records and applies the trained model to calculate risk scores for potential diabetes cases. These calculated predictions are then automatically saved into a dedicated reporting location. If the process encounters any failure at any step, it sends an immediate alert to the internal operations team. The finished predictions are ready for managers and operations staff to view in the reporting system.
 
 Insufficient information available.
 
 ```mermaid
 flowchart LR
-    TestInput[Validated Test Data Records] --> DiabetesPipeline[Diabetes Prediction Pipeline];
-    PredictionInput[Generated Prediction Sets] --> DiabetesPipeline;
-    DiabetesPipeline --> ReportOutput[Prediction Report Sink];
-    DiabetesPipeline --> AlertOutput[System Failure Notification];
+    TestData[Input Test Measurements] --> DiabetesPredictionPipeline
+    ModelSource[Trained Prediction Model Artifacts] --> DiabetesPredictionPipeline
+    DiabetesPredictionPipeline[Diabetes Prediction Pipeline] --> ReportingSink[Final Prediction Reports]
+    DiabetesPredictionPipeline --> AlertNotification[Failure Alert Service]
 ```
+
+**Steps:**
+1. The pipeline starts by checking the required model version. It uses the ModelVersion parameter to determine which prediction model to use.
+2. It checks if the input data set, specified by the TestTableName parameter, exists.
+3. If the input data set is found, the pipeline reads the data records from the data set.
+4. If the data set is empty, the pipeline stops and issues a failure alert.
+5. If the model is outdated (checked using the ModelVersion parameter), the pipeline first calls the Generate-Predictions process.
+    1. The Generate-Predictions process first trains a new machine learning model using a complete training data set.
+    2. It then prepares a specialized test data set from the training data.
+    3. Finally, it applies the newly trained model to create the prediction scores.
+    4. The pipeline then accepts the updated model version and continues.
+6. The pipeline applies the selected prediction model (either the newly trained one or the existing one) to the current input data records.
+7. These predictions create a new data set containing the required predictions for each customer.
+8. Next, the pipeline copies these generated predictions into a separate reporting data source.
+9. Finally, the pipeline sends an alert notification indicating a successful run.
+On failure:
+  The pipeline sends an immediate alert message to the internal alert service. This notification explains the failure so staff can address the issue.
 
 ## Business Goal
 
-This pipeline generates predictions to estimate disease risk using historical patient records. It provides healthcare staff with an automated tool to flag individuals who may need early screening or preventative care.
-The process works in several stages, starting with a review of the data itself. First, the system checks if it needs to retrain the prediction model.
-If retraining is required, it executes a step to update the core model using the latest patient data. If the model is already trained and stable, it skips this step.
-The process then validates the current test data records. This step confirms
+Insufficient information available.
 
 Insufficient information available.
 
@@ -44,30 +61,7 @@ Insufficient information available.
 
 ## Column Lineage
 
-### Bronze → Silver
-| Source | Target Column | Transformation Logic |
-| :--- | :--- | :--- |
-| AGE | AGE | Pass-through (Selected Feature) |
-| SEX | SEX | Pass-through (Selected Feature) |
-| BMI | BMI | Pass-through (Selected Feature) |
-| BP | BP | Pass-through (Selected Feature) |
-| S1 | S1 | Pass-through (Selected Feature) |
-| S2 | S2 | Pass-through (Selected Feature) |
-| S3 | S3 | Pass-through (Selected Feature) |
-| S4 | S4 | Pass-through (Selected Feature) |
-| S5 | S5 | Pass-through (Selected Feature) |
-| S6 | S6 | Pass-through (Selected Feature) |
-
-### Silver → Gold
-| Source | Target Column | Transformation Logic |
-| :--- | :--- | :--- |
-| AGE | Predicted_Y | Used as input feature to calculate the final prediction [^1] |
-| SEX | Predicted_Y | Used as input feature to calculate the final prediction [^1] |
-| BMI | Predicted_Y | Used as input feature to calculate the final prediction [^1] |
-| BP | Predicted_Y | Used as input feature to calculate the final prediction [^1] |
-| S1 | Predicted_Y | Used as input feature to calculate the final prediction [^1] |
-| S2 | Predicted_Y | Used as input feature to calculate the final prediction [^1] |
-| S3 | Predicted_Y | Used as input feature to calculate the final prediction [^1]
+No column lineage detected in this artifact.
 
 
 ---

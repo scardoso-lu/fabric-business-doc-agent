@@ -23,11 +23,33 @@ from pathlib import Path
 from agent.ai.base_client import BaseLLMClient
 from agent.ai.llm_client import _summarise_props
 from agent.config import ACTIVITY_TYPE_LABELS, DATAFLOW_ACTIVITY_TYPES, DEPENDENCY_CONDITION_LABELS
+from agent.enrichers.ticket_enricher import fetch_ticket_context
 from agent.parsers.dataflow_parser import ParsedDataflow
 from agent.parsers.notebook_parser import ParsedNotebook
 from agent.parsers.pipeline_parser import ParsedPipeline, PipelineActivity
+from agent.parsers.powerautomate_parser import ParsedPowerAutomateFlow
 
 SECTIONS = ["Purpose", "Flow", "Business Goal", "Data Quality & Alerts", "Column Lineage"]
+
+_FLOW_FALLBACK_CHARS = 1500
+
+
+def _build_purpose_content(artifact_name: str, purpose_content: str, flow_content: str) -> str:
+    """Return purpose content enriched with ticket/PR context if available.
+
+    If linked work items or pull requests are found for *artifact_name*, they
+    are prepended so the LLM can ground the purpose in real business intent.
+    When nothing is found, the data-flow content is appended as a fallback so
+    the LLM can infer the purpose from what the artifact actually does.
+    """
+    ticket_ctx = fetch_ticket_context(artifact_name)
+    if ticket_ctx:
+        return f"Linked work items and pull requests:\n{ticket_ctx}\n\n{purpose_content}"
+    return (
+        f"{purpose_content}\n\n"
+        f"Data flow context (use this to infer the business purpose if the above is insufficient):\n"
+        f"{flow_content[:_FLOW_FALLBACK_CHARS]}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -43,11 +65,12 @@ def generate_pipeline_doc(
     dataflow_map = dataflow_map or {}
     doc_group = pipeline.name
     c = _pipeline_contents(pipeline, notebook_map, dataflow_map)
+    purpose_content = _build_purpose_content(pipeline.name, c["purpose"], c["relationships"])
 
     parts = [
         f"# {pipeline.name}",
         _meta_block("Pipeline", pipeline.source_path),
-        f"## Purpose\n\n{client.section_purpose(pipeline.name, c['purpose'], doc_group)}",
+        f"## Purpose\n\n{client.section_purpose(pipeline.name, purpose_content, doc_group)}",
         f"## Flow\n\n{client.section_flow(pipeline.name, c['relationships'], doc_group)}",
         f"## Business Goal\n\n{client.section_business_goal(pipeline.name, c['goal'], doc_group)}",
         f"## Data Quality & Alerts\n\n{client.section_data_quality(pipeline.name, c['quality'], doc_group)}",
@@ -62,11 +85,12 @@ def generate_pipeline_doc(
 def generate_notebook_doc(notebook: ParsedNotebook, client: BaseLLMClient) -> str:
     doc_group = notebook.name
     c = _notebook_contents(notebook)
+    purpose_content = _build_purpose_content(notebook.name, c["purpose"], c["relationships"])
 
     parts = [
         f"# {notebook.name}",
         _meta_block("Data Process", notebook.source_path),
-        f"## Purpose\n\n{client.section_purpose(notebook.name, c['purpose'], doc_group)}",
+        f"## Purpose\n\n{client.section_purpose(notebook.name, purpose_content, doc_group)}",
         f"## Flow\n\n{client.section_flow(notebook.name, c['relationships'], doc_group)}",
         f"## Business Goal\n\n{client.section_business_goal(notebook.name, c['goal'], doc_group)}",
         f"## Data Quality & Alerts\n\n{client.section_data_quality(notebook.name, c['quality'], doc_group)}",
@@ -81,11 +105,12 @@ def generate_notebook_doc(notebook: ParsedNotebook, client: BaseLLMClient) -> st
 def generate_dataflow_doc(dataflow: ParsedDataflow, client: BaseLLMClient) -> str:
     doc_group = dataflow.name
     c = _dataflow_contents(dataflow)
+    purpose_content = _build_purpose_content(dataflow.name, c["purpose"], c["relationships"])
 
     parts = [
         f"# {dataflow.name}",
         _meta_block("Dataflow Gen2", dataflow.source_path),
-        f"## Purpose\n\n{client.section_purpose(dataflow.name, c['purpose'], doc_group)}",
+        f"## Purpose\n\n{client.section_purpose(dataflow.name, purpose_content, doc_group)}",
         f"## Flow\n\n{client.section_flow(dataflow.name, c['relationships'], doc_group)}",
         f"## Business Goal\n\n{client.section_business_goal(dataflow.name, c['goal'], doc_group)}",
         f"## Data Quality & Alerts\n\n{client.section_data_quality(dataflow.name, c['quality'], doc_group)}",
@@ -93,6 +118,26 @@ def generate_dataflow_doc(dataflow: ParsedDataflow, client: BaseLLMClient) -> st
         "\n---",
         f"*Documentation generated on {datetime.now().strftime('%Y-%m-%d')} "
         f"from `{dataflow.source_path.name}`.*",
+    ]
+    return "\n\n".join(parts)
+
+
+def generate_powerautomate_doc(flow: ParsedPowerAutomateFlow, client: BaseLLMClient) -> str:
+    doc_group = flow.name
+    c = _powerautomate_contents(flow)
+    purpose_content = _build_purpose_content(flow.name, c["purpose"], c["relationships"])
+
+    parts = [
+        f"# {flow.name}",
+        _meta_block("Power Automate Flow", flow.source_path),
+        f"## Purpose\n\n{client.section_purpose(flow.name, purpose_content, doc_group)}",
+        f"## Flow\n\n{client.section_flow(flow.name, c['relationships'], doc_group)}",
+        f"## Business Goal\n\n{client.section_business_goal(flow.name, c['goal'], doc_group)}",
+        f"## Data Quality & Alerts\n\n{client.section_data_quality(flow.name, c['quality'], doc_group)}",
+        f"## Column Lineage\n\n{client.section_column_lineage(flow.name, _lineage_content_powerautomate(flow), doc_group)}",
+        "\n---",
+        f"*Documentation generated on {datetime.now().strftime('%Y-%m-%d')} "
+        f"from `{flow.source_path.name}`.*",
     ]
     return "\n\n".join(parts)
 
@@ -170,11 +215,11 @@ def _pipeline_contents(
             dataflow_refs.append(f"{df.name} (queries: {', '.join(df.query_names)})")
             dataflow_mcode += df.all_mcode[:1500] + "\n"
 
-    # Control / fail / webhook activities — signal quality checks
+    # Control / fail / webhook / web activities — signal quality checks and external alerts
     quality_activities = [
         f"{a.name} ({ACTIVITY_TYPE_LABELS.get(a.activity_type, a.activity_type)}): {_summarise_props(a.type_properties)}"
         for a in ordered
-        if a.activity_type in ("IfCondition", "Fail", "WebHook", "Filter", "Until", "Switch")
+        if a.activity_type in ("IfCondition", "Fail", "WebHook", "Filter", "Until", "Switch", "Web")
     ]
 
     # External connections — bronze activities
@@ -205,9 +250,40 @@ def _pipeline_contents(
         "quality": (
             f"Pipeline: {pipeline.name}\n"
             + (f"Control and error steps: {'; '.join(quality_activities)}\n" if quality_activities else "")
-            + (f"Code excerpt:\n{all_code[:2000]}" if all_code else "")
+            + (f"Error and alert signals:\n{_extract_alert_signals(all_code)}\n\n" if all_code else "")
+            + (f"Full code excerpt:\n{all_code[:2000]}" if all_code else "")
         ),
     }
+
+
+def _extract_alert_signals(code: str) -> str:
+    """Return lines from *code* that contain error-raising or notification patterns.
+
+    Captures raise/except statements, logging calls, and external notification
+    patterns (email, webhook, Teams, Slack, monitoring APIs) with one line of
+    surrounding context so the LLM has enough to interpret each signal.
+    """
+    keywords = (
+        "raise ", "except ", "exception",
+        "logging.", "logger.", "log.error", "log.warn", "log.critical",
+        "print(",
+        "email", "smtp", "sendmail", "send_mail", "send_email",
+        "notify", "notification", "alert",
+        "webhook", "teams", "slack",
+        "requests.post", "requests.get", "http",
+    )
+    lines = code.splitlines()
+    collected: list[str] = []
+    seen: set[int] = set()
+    for i, line in enumerate(lines):
+        lower = line.lower()
+        if any(kw in lower for kw in keywords):
+            for idx in range(max(0, i - 1), min(len(lines), i + 2)):
+                if idx not in seen:
+                    collected.append(lines[idx])
+                    seen.add(idx)
+            collected.append("…")
+    return "\n".join(collected[:60])  # cap to avoid prompt bloat
 
 
 def _notebook_contents(notebook: ParsedNotebook) -> dict[str, str]:
@@ -215,6 +291,7 @@ def _notebook_contents(notebook: ParsedNotebook) -> dict[str, str]:
     headings = ", ".join(s.heading for s in notebook.sections)
     description = notebook.description or ""
     code = notebook.all_code
+    alert_signals = _extract_alert_signals(code)
 
     return {
         "purpose": f"Process: {notebook.name}\nDescription: {description}\nSections: {headings}",
@@ -228,7 +305,8 @@ def _notebook_contents(notebook: ParsedNotebook) -> dict[str, str]:
         "goal": f"Process: {notebook.name}\nDescription: {description}\nSections: {headings}",
         "quality": (
             f"Process: {notebook.name}\nSections: {headings}\n"
-            f"Code excerpt:\n{code[:3000]}"
+            + (f"Error and alert signals:\n{alert_signals}\n\n" if alert_signals else "")
+            + f"Full code excerpt:\n{code[:2500]}"
         ),
     }
 
@@ -256,8 +334,48 @@ def _dataflow_contents(dataflow: ParsedDataflow) -> dict[str, str]:
         "goal":    base + mcode[:2000],
         "quality": (
             base
-            + "Focus on filter steps, error handling, null checks, and type validations.\n\n"
+            + "Focus on filter steps, error handling, null checks, type validations, and any error or notification expressions.\n\n"
             + mcode[:3000]
+        ),
+    }
+
+
+_PA_PREAMBLE = (
+    "The following describes a Microsoft Power Automate flow. "
+    "Power Automate connects apps and services to automate business processes. "
+    "A trigger starts the flow; actions are the steps executed in response.\n\n"
+)
+
+
+def _powerautomate_contents(flow: ParsedPowerAutomateFlow) -> dict[str, str]:
+    """Return a dict of tailored content strings, one per document section."""
+    description = flow.description or ""
+    trigger_text = f"Trigger: {flow.trigger_summary}\n" if flow.trigger_summary else ""
+    conn_text = f"Connected services: {', '.join(flow.connections)}\n" if flow.connections else ""
+
+    # Group actions by type for quality/error analysis
+    control_types = {"condition", "switch", "terminate", "filter", "scope", "foreach", "apply_to_each", "do_until"}
+    control_actions = [
+        f"{a.name} ({a.type})"
+        for a in flow.actions
+        if a.type.lower() in control_types
+    ]
+    all_actions = ", ".join(a.name for a in flow.actions)
+
+    base = f"{_PA_PREAMBLE}Flow: {flow.name}\nDescription: {description}\n"
+    relationships = base + trigger_text + (f"Actions: {all_actions}\n" if all_actions else "") + conn_text
+
+    return {
+        "purpose": relationships,
+        "relationships": relationships,
+        "goal": relationships,
+        "quality": (
+            base
+            + trigger_text
+            + (f"Control and branching steps: {', '.join(control_actions)}\n" if control_actions else "")
+            + (f"All actions: {all_actions}\n" if all_actions else "")
+            + conn_text
+            + "Focus on error handling, condition checks, and failure branches (Terminate actions, Condition steps)."
         ),
     }
 
@@ -308,6 +426,28 @@ def _lineage_content_notebook(notebook: ParsedNotebook) -> str:
         "",
         notebook.all_code,
     ]
+    return "\n".join(parts)
+
+
+def _lineage_content_powerautomate(flow: ParsedPowerAutomateFlow) -> str:
+    """Return a description of the flow for column lineage extraction.
+
+    Power Automate flows move data between services rather than transforming
+    database columns, so lineage is expressed as a service-to-service data
+    transfer description rather than a column mapping.
+    """
+    parts = [
+        f"Power Automate Flow: {flow.name}",
+        f"Description: {flow.description or '(none)'}",
+        f"Trigger: {flow.trigger_summary or '(none)'}",
+        f"Connected services: {', '.join(flow.connections) or '(none)'}",
+        "",
+        "Actions (in declared order):",
+    ]
+    for action in flow.actions:
+        conn_note = f" via {action.connection}" if action.connection else ""
+        after_note = f" (runs after: {', '.join(action.run_after)})" if action.run_after else ""
+        parts.append(f"  - {action.name} [{action.type}{conn_note}]{after_note}")
     return "\n".join(parts)
 
 

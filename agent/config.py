@@ -30,6 +30,13 @@ CONTEXT_FILE = os.getenv("CONTEXT_FILE", "")
 # Path to the prompt configuration markdown file.
 # Defaults to prompts.md in the project root. Set to "" to disable.
 PROMPTS_FILE = os.getenv("PROMPTS_FILE", str(ROOT_DIR / "prompts.md"))
+# Artifact types to scan — comma-separated list.
+# Supported values: pipeline, notebook, dataflow, powerautomate
+# Default omits powerautomate so existing repos are not affected.
+# Set ARTIFACT_TYPES=pipeline,notebook,dataflow,powerautomate to enable all.
+_raw_artifact_types = os.getenv("ARTIFACT_TYPES", "pipeline,notebook,dataflow")
+ARTIFACT_TYPES: list[str] = [t.strip().lower() for t in _raw_artifact_types.split(",") if t.strip()]
+
 CONTEXT_TEXT: str = ""
 if CONTEXT_FILE:
     try:

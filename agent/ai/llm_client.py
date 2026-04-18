@@ -238,7 +238,7 @@ class LLMClient(BaseLLMClient):
             if "```mermaid" in template:
                 parts.append(self._call_flow(prompt))
             else:
-                parts.append(self._call(prompt, max_tokens=400))
+                parts.append(self._call(prompt, max_tokens=600))
         return "\n\n".join(parts)
 
     def section_business_goal(self, name: str, content: str, doc_group: str = "") -> str:

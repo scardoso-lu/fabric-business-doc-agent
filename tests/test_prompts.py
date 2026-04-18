@@ -239,9 +239,9 @@ class TestGetSubPrompts:
         result = get_sub_prompts("purpose")
         assert len(result) == 2
 
-    def test_flow_has_two_sub_prompts(self):
+    def test_flow_has_three_sub_prompts(self):
         result = get_sub_prompts("flow")
-        assert len(result) == 2
+        assert len(result) == 3
 
     def test_flow_second_sub_prompt_contains_mermaid(self):
         result = get_sub_prompts("flow")
@@ -250,6 +250,11 @@ class TestGetSubPrompts:
     def test_flow_first_sub_prompt_has_no_mermaid(self):
         result = get_sub_prompts("flow")
         assert "```mermaid" not in result[0]
+
+    def test_flow_third_sub_prompt_is_pseudocode(self):
+        result = get_sub_prompts("flow")
+        assert "pseudo-code" in result[2].lower() or "steps" in result[2].lower()
+        assert "```mermaid" not in result[2]
 
     def test_business_goal_has_two_sub_prompts(self):
         result = get_sub_prompts("business_goal")
