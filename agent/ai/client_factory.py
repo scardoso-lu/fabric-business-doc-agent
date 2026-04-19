@@ -1,7 +1,7 @@
 from agent.ai.base_client import BaseLLMClient
 from agent.config import LLM_PROVIDER
 
-_KNOWN_PROVIDERS = {"anthropic", "openai", "ollama", "local"}
+_KNOWN_PROVIDERS = {"anthropic", "openai", "ollama", "local", "copilot"}
 
 
 def create_client() -> BaseLLMClient:
@@ -15,5 +15,8 @@ def create_client() -> BaseLLMClient:
     if provider == "local":
         from agent.ai.local_claude_client import LocalClaudeClient
         return LocalClaudeClient()
+    if provider == "copilot":
+        from agent.ai.copilot_client import CopilotCLIClient
+        return CopilotCLIClient()
     from agent.ai.llm_client import LLMClient
     return LLMClient()
