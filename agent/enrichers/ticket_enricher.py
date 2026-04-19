@@ -8,6 +8,14 @@ Supported backends (both optional, both tried if configured):
 Returns a plain-text summary of found items, or an empty string when nothing
 is found or neither backend is configured. The caller is responsible for
 deciding how to use the context (e.g. prepend to purpose content).
+
+Work item search strategy (Azure DevOps):
+  1. ADO Search REST API (almsearch.dev.azure.com) — full-text across all fields,
+     fetches up to _SEARCH_CANDIDATES results.
+  2. LLM re-ranking — the already-running LLM client filters the candidates down
+     to those genuinely relevant to the artifact (skipped when client is None).
+  3. WIQL fallback — used when the Search API is unavailable (e.g. on-premises
+     ADO Server without Search enabled).
 """
 
 from __future__ import annotations
@@ -18,7 +26,8 @@ import re
 
 import requests
 
-_MAX_RESULTS = 5
+_MAX_RESULTS = 5          # WIQL fallback and PR search result cap
+_SEARCH_CANDIDATES = 10   # wider net for Search API before LLM re-ranking
 _TIMEOUT = 10
 
 # Common Fabric/Power Automate type prefixes that are never part of the business name
@@ -30,6 +39,8 @@ _PREFIX_RE = re.compile(
 _VERSION_RE = re.compile(r"[-_]v\d+$", re.IGNORECASE)
 # CamelCase word boundary: LoadCustomerData → Load Customer Data
 _CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+# ADO Search API highlight tags
+_HIGHLIGHT_TAG_RE = re.compile(r"</?highlighthit>", re.IGNORECASE)
 
 
 def _normalize_artifact_name(name: str) -> str:
@@ -53,15 +64,27 @@ def _normalize_artifact_name(name: str) -> str:
     return name.strip()
 
 
-def fetch_ticket_context(artifact_name: str) -> str:
-    """Return a formatted string of related tickets/PRs, or '' if none found."""
+def _strip_highlight_tags(text: str) -> str:
+    """Remove <highlighthit> / </highlighthit> tags from ADO Search API snippets."""
+    return _HIGHLIGHT_TAG_RE.sub("", text)
+
+
+def fetch_ticket_context(artifact_name: str, client=None) -> str:
+    """Return a formatted string of related tickets/PRs, or '' if none found.
+
+    Args:
+        artifact_name: The technical name of the artifact being documented.
+        client: Optional BaseLLMClient used to re-rank Azure DevOps search
+                results.  When None, all Search API candidates are returned
+                without filtering.
+    """
     parts: list[str] = []
 
     jira_ctx = _fetch_jira(artifact_name)
     if jira_ctx:
         parts.append(jira_ctx)
 
-    azdo_ctx = _fetch_azdo(artifact_name)
+    azdo_ctx = _fetch_azdo(artifact_name, client)
     if azdo_ctx:
         parts.append(azdo_ctx)
 
@@ -140,7 +163,7 @@ def _extract_jira_text(node) -> str:
 # Azure DevOps
 # ---------------------------------------------------------------------------
 
-def _fetch_azdo(name: str) -> str:
+def _fetch_azdo(name: str, client=None) -> str:
     org = os.getenv("AZDO_ORG", "")
     project = os.getenv("AZDO_PROJECT", "")
     pat = os.getenv("AZDO_PAT", "")
@@ -157,15 +180,106 @@ def _fetch_azdo(name: str) -> str:
 
     parts: list[str] = []
 
-    wi_ctx = _fetch_azdo_workitems(name, base_url, headers)
+    # Search API first (full-text, all fields); WIQL as fallback
+    wi_ctx = _search_azdo_workitems(name, org, project, headers)
+    if not wi_ctx:
+        wi_ctx = _fetch_azdo_workitems(name, base_url, headers)
     if wi_ctx:
-        parts.append(wi_ctx)
+        wi_ctx = _rerank_work_items(name, wi_ctx, client)
+        if wi_ctx:
+            parts.append(wi_ctx)
 
     pr_ctx = _fetch_azdo_prs(name, base_url, headers)
     if pr_ctx:
         parts.append(pr_ctx)
 
     return "\n\n".join(parts)
+
+
+def _search_azdo_workitems(name: str, org: str, project: str, headers: dict) -> str:
+    """Full-text search across all work item fields via the ADO Search REST API.
+
+    Fetches up to _SEARCH_CANDIDATES results so the LLM re-ranker has a wider
+    pool to choose the best matches from.  Field names in the response are
+    lowercase (system.id, system.title, …), unlike the WIQL endpoint.
+    """
+    normalized = _normalize_artifact_name(name)
+    search_text = normalized if normalized else name
+    url = (
+        f"https://almsearch.dev.azure.com/{org}/{project}"
+        f"/_apis/search/workitemsearchresults?api-version=7.1-preview.1"
+    )
+    payload = {
+        "searchText": search_text,
+        "$top": _SEARCH_CANDIDATES,
+        "includeSnippet": True,
+        "filters": {"System.TeamProject": [project]},
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=_TIMEOUT)
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if not results:
+            return ""
+
+        lines = ["Azure DevOps work items:"]
+        for result in results:
+            fields  = result.get("fields", {})
+            wi_id   = fields.get("system.id", "")
+            title   = fields.get("system.title", "")
+            wi_type = fields.get("system.workitemtype", "")
+            state   = fields.get("system.state", "")
+
+            hits    = result.get("hits", [])
+            snippet = ""
+            if hits:
+                raw_hl  = hits[0].get("highlights", [""])[0]
+                snippet = _strip_highlight_tags(raw_hl)
+            if not snippet:
+                raw_desc = fields.get("system.description", "") or ""
+                snippet  = re.sub(r"<[^>]+>", " ", raw_desc).strip()[:200]
+
+            line = f"- [#{wi_id}] {title}"
+            meta = [p for p in (wi_type, state) if p]
+            if meta:
+                line += f" ({', '.join(meta)})"
+            if snippet:
+                line += f"\n  {snippet}"
+            lines.append(line)
+
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _rerank_work_items(artifact_name: str, items_text: str, client) -> str:
+    """Ask the LLM to keep only work items genuinely relevant to the artifact.
+
+    Passes the raw Search/WIQL result block to the active LLM client with a
+    short filtering prompt.  Returns the original block unchanged when:
+      - client is None (no LLM configured)
+      - the LLM strips everything useful
+      - the LLM call raises an exception
+    """
+    if client is None:
+        return items_text
+
+    prompt = (
+        f"The following Azure DevOps work items were retrieved while documenting "
+        f'the artifact "{artifact_name}". '
+        f"Keep only the items that are genuinely relevant to this artifact. "
+        f"Remove any that are unrelated or only tangentially matched. "
+        f'Return exactly the same bullet-point format — each line starting with "- [#". '
+        f"If none are relevant, return an empty string.\n\n"
+        f"{items_text}"
+    )
+    try:
+        filtered = client._call(prompt, max_tokens=500)
+        if not filtered or "- [#" not in filtered:
+            return items_text
+        return "Azure DevOps work items:\n" + filtered.strip()
+    except Exception:
+        return items_text
 
 
 def _fetch_azdo_workitems(name: str, base_url: str, headers: dict) -> str:
