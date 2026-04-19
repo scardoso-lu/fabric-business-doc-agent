@@ -21,6 +21,37 @@ import requests
 _MAX_RESULTS = 5
 _TIMEOUT = 10
 
+# Common Fabric/Power Automate type prefixes that are never part of the business name
+_PREFIX_RE = re.compile(
+    r"^(?:pl|nb|df|pa|pipeline|notebook|dataflow|powerautomate|flow)[-_]",
+    re.IGNORECASE,
+)
+# Version suffixes like _v2, -v3
+_VERSION_RE = re.compile(r"[-_]v\d+$", re.IGNORECASE)
+# CamelCase word boundary: LoadCustomerData → Load Customer Data
+_CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _normalize_artifact_name(name: str) -> str:
+    """
+    Convert a technical artifact name to a human-readable search string.
+
+    Strips common type prefixes and version suffixes, splits CamelCase,
+    and replaces underscores/hyphens with spaces so the result matches
+    the natural-language titles used in work items and pull requests.
+
+    Examples:
+      pl_load_customer_data     → load customer data
+      nb_SalesForecast_v2       → SalesForecast  → sales forecast
+      LoadCustomerData          → Load Customer Data
+      customer-data-pipeline    → customer data pipeline
+    """
+    name = _PREFIX_RE.sub("", name)
+    name = _VERSION_RE.sub("", name)
+    name = _CAMEL_RE.sub(" ", name)
+    name = re.sub(r"[-_]+", " ", name)
+    return name.strip()
+
 
 def fetch_ticket_context(artifact_name: str) -> str:
     """Return a formatted string of related tickets/PRs, or '' if none found."""
@@ -50,7 +81,12 @@ def _fetch_jira(name: str) -> str:
         return ""
 
     project_key = os.getenv("JIRA_PROJECT_KEY", "")
-    jql = f'text ~ "{name}"'
+    normalized = _normalize_artifact_name(name)
+    if normalized and normalized.lower() != name.lower():
+        text_clause = f'text ~ "{name}" OR text ~ "{normalized}"'
+    else:
+        text_clause = f'text ~ "{name}"'
+    jql = f"({text_clause})"
     if project_key:
         jql = f"project = {project_key} AND {jql}"
     jql += " ORDER BY updated DESC"
@@ -134,10 +170,24 @@ def _fetch_azdo(name: str) -> str:
 
 def _fetch_azdo_workitems(name: str, base_url: str, headers: dict) -> str:
     safe_name = name.replace("'", "''")
+    normalized = _normalize_artifact_name(name)
+    safe_norm = normalized.replace("'", "''")
+
+    # Match the raw technical name (exact substring) OR the human-readable
+    # normalized form using word-level matching so "load customer data" matches
+    # "Load Customer Data Pipeline" even though the artifact is "pl_load_customer_data".
+    if safe_norm and safe_norm.lower() != safe_name.lower():
+        where = (
+            f"[System.Title] CONTAINS '{safe_name}' "
+            f"OR [System.Title] CONTAINS WORDS '{safe_norm}'"
+        )
+    else:
+        where = f"[System.Title] CONTAINS '{safe_name}'"
+
     wiql = {
         "query": (
             f"SELECT [System.Id] FROM WorkItems "
-            f"WHERE [System.Title] CONTAINS '{safe_name}' "
+            f"WHERE {where} "
             f"ORDER BY [System.ChangedDate] DESC"
         )
     }
@@ -184,12 +234,14 @@ def _fetch_azdo_workitems(name: str, base_url: str, headers: dict) -> str:
 
 
 def _fetch_azdo_prs(name: str, base_url: str, headers: dict) -> str:
+    normalized = _normalize_artifact_name(name)
+    search_title = normalized if normalized else name
     try:
         resp = requests.get(
             f"{base_url}/git/pullrequests",
             params={
                 "searchCriteria.status": "all",
-                "searchCriteria.title": name,
+                "searchCriteria.title": search_title,
                 "$top": _MAX_RESULTS,
                 "api-version": "7.1",
             },

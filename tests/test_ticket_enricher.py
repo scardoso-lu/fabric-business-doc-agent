@@ -10,8 +10,56 @@ from agent.enrichers.ticket_enricher import (
     _fetch_azdo_prs,
     _fetch_azdo_workitems,
     _fetch_jira,
+    _normalize_artifact_name,
     fetch_ticket_context,
 )
+
+
+# ---------------------------------------------------------------------------
+# _normalize_artifact_name
+# ---------------------------------------------------------------------------
+
+class TestNormalizeArtifactName:
+    def test_strips_pl_prefix(self):
+        assert _normalize_artifact_name("pl_load_customer_data") == "load customer data"
+
+    def test_strips_nb_prefix(self):
+        assert _normalize_artifact_name("nb_sales_forecast") == "sales forecast"
+
+    def test_strips_df_prefix(self):
+        assert _normalize_artifact_name("df_order_processing") == "order processing"
+
+    def test_strips_pa_prefix(self):
+        assert _normalize_artifact_name("pa_send_notification") == "send notification"
+
+    def test_strips_pipeline_prefix(self):
+        assert _normalize_artifact_name("pipeline_load_data") == "load data"
+
+    def test_strips_version_suffix(self):
+        assert _normalize_artifact_name("pl_load_data_v2") == "load data"
+
+    def test_strips_version_suffix_hyphen(self):
+        assert _normalize_artifact_name("nb_forecast-v3") == "forecast"
+
+    def test_splits_camelcase(self):
+        assert _normalize_artifact_name("LoadCustomerData") == "Load Customer Data"
+
+    def test_replaces_underscores_with_spaces(self):
+        assert _normalize_artifact_name("load_customer_data") == "load customer data"
+
+    def test_replaces_hyphens_with_spaces(self):
+        assert _normalize_artifact_name("load-customer-data") == "load customer data"
+
+    def test_prefix_and_camel(self):
+        result = _normalize_artifact_name("pl_LoadCustomerData")
+        assert "Load Customer Data" in result
+        assert "pl" not in result.lower().split()[0]
+
+    def test_no_transformation_needed(self):
+        assert _normalize_artifact_name("salesdata") == "salesdata"
+
+    def test_empty_string(self):
+        assert _normalize_artifact_name("") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +178,24 @@ class TestFetchJiraConfigured:
             _fetch_jira("PipelineX")
         assert "project = MYPROJ" in captured["jql"]
 
+    def test_jql_includes_normalized_name_for_prefixed_artifact(self, monkeypatch):
+        monkeypatch.delenv("JIRA_PROJECT_KEY", raising=False)
+        captured = {}
+
+        def mock_get(url, headers, params, timeout):
+            captured["jql"] = params["jql"]
+            resp = MagicMock()
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = {"issues": []}
+            return resp
+
+        with patch("requests.get", side_effect=mock_get):
+            _fetch_jira("pl_load_customer_data")
+
+        jql = captured["jql"]
+        assert "pl_load_customer_data" in jql
+        assert "load customer data" in jql
+
 
 # ---------------------------------------------------------------------------
 # _fetch_azdo — not configured
@@ -221,6 +287,41 @@ class TestFetchAzdoWorkitems:
             result = _fetch_azdo_workitems("X", self._BASE, self._headers())
         assert result == ""
 
+    def test_wiql_uses_contains_words_with_normalized_name(self):
+        """Prefixed snake_case names should produce an OR with CONTAINS WORDS."""
+        captured = {}
+        wiql_resp = MagicMock()
+        wiql_resp.raise_for_status.return_value = None
+        wiql_resp.json.return_value = {"workItems": []}
+
+        def mock_post(url, json, headers, timeout):
+            captured["query"] = json["query"]
+            return wiql_resp
+
+        with patch("requests.post", side_effect=mock_post):
+            _fetch_azdo_workitems("pl_load_customer_data", self._BASE, self._headers())
+
+        query = captured["query"]
+        assert "CONTAINS WORDS" in query
+        assert "load customer data" in query.lower()
+
+    def test_wiql_no_or_when_name_unchanged_by_normalisation(self):
+        """A name that normalises to itself should use a simple CONTAINS."""
+        captured = {}
+        wiql_resp = MagicMock()
+        wiql_resp.raise_for_status.return_value = None
+        wiql_resp.json.return_value = {"workItems": []}
+
+        def mock_post(url, json, headers, timeout):
+            captured["query"] = json["query"]
+            return wiql_resp
+
+        with patch("requests.post", side_effect=mock_post):
+            _fetch_azdo_workitems("salesdata", self._BASE, self._headers())
+
+        assert "CONTAINS WORDS" not in captured["query"]
+        assert "salesdata" in captured["query"]
+
 
 # ---------------------------------------------------------------------------
 # _fetch_azdo_prs — mocked HTTP
@@ -251,6 +352,22 @@ class TestFetchAzdoPRs:
             result = _fetch_azdo_prs("SalesPipeline", self._BASE, self._headers())
         assert "PR #99" in result
         assert "Add SalesPipeline" in result
+
+    def test_pr_search_uses_normalized_title(self):
+        """PR search should use the human-readable name, not the prefixed one."""
+        captured = {}
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"value": []}
+
+        def mock_get(url, params, headers, timeout):
+            captured["title"] = params.get("searchCriteria.title")
+            return resp
+
+        with patch("requests.get", side_effect=mock_get):
+            _fetch_azdo_prs("pl_load_customer_data", self._BASE, self._headers())
+
+        assert captured["title"] == "load customer data"
 
     def test_http_error_returns_empty(self):
         with patch("requests.get", side_effect=Exception("timeout")):
