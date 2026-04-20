@@ -34,15 +34,23 @@ SECTIONS = ["Purpose", "Flow", "Business Goal", "Data Quality & Alerts", "Column
 _FLOW_FALLBACK_CHARS = 1500
 
 
-def _build_purpose_content(artifact_name: str, purpose_content: str, flow_content: str) -> str:
+def _build_purpose_content(
+    artifact_name: str,
+    purpose_content: str,
+    flow_content: str,
+    client=None,
+) -> str:
     """Return purpose content enriched with ticket/PR context if available.
 
     If linked work items or pull requests are found for *artifact_name*, they
     are prepended so the LLM can ground the purpose in real business intent.
     When nothing is found, the data-flow content is appended as a fallback so
     the LLM can infer the purpose from what the artifact actually does.
+
+    *client* is forwarded to the ticket enricher so it can re-rank Search API
+    candidates before returning them.
     """
-    ticket_ctx = fetch_ticket_context(artifact_name)
+    ticket_ctx = fetch_ticket_context(artifact_name, client)
     if ticket_ctx:
         return f"Linked work items and pull requests:\n{ticket_ctx}\n\n{purpose_content}"
     return (
@@ -65,7 +73,7 @@ def generate_pipeline_doc(
     dataflow_map = dataflow_map or {}
     doc_group = pipeline.name
     c = _pipeline_contents(pipeline, notebook_map, dataflow_map)
-    purpose_content = _build_purpose_content(pipeline.name, c["purpose"], c["relationships"])
+    purpose_content = _build_purpose_content(pipeline.name, c["purpose"], c["relationships"], client)
 
     parts = [
         f"# {pipeline.name}",
@@ -85,7 +93,7 @@ def generate_pipeline_doc(
 def generate_notebook_doc(notebook: ParsedNotebook, client: BaseLLMClient) -> str:
     doc_group = notebook.name
     c = _notebook_contents(notebook)
-    purpose_content = _build_purpose_content(notebook.name, c["purpose"], c["relationships"])
+    purpose_content = _build_purpose_content(notebook.name, c["purpose"], c["relationships"], client)
 
     parts = [
         f"# {notebook.name}",
@@ -105,7 +113,7 @@ def generate_notebook_doc(notebook: ParsedNotebook, client: BaseLLMClient) -> st
 def generate_dataflow_doc(dataflow: ParsedDataflow, client: BaseLLMClient) -> str:
     doc_group = dataflow.name
     c = _dataflow_contents(dataflow)
-    purpose_content = _build_purpose_content(dataflow.name, c["purpose"], c["relationships"])
+    purpose_content = _build_purpose_content(dataflow.name, c["purpose"], c["relationships"], client)
 
     parts = [
         f"# {dataflow.name}",
@@ -125,7 +133,7 @@ def generate_dataflow_doc(dataflow: ParsedDataflow, client: BaseLLMClient) -> st
 def generate_powerautomate_doc(flow: ParsedPowerAutomateFlow, client: BaseLLMClient) -> str:
     doc_group = flow.name
     c = _powerautomate_contents(flow)
-    purpose_content = _build_purpose_content(flow.name, c["purpose"], c["relationships"])
+    purpose_content = _build_purpose_content(flow.name, c["purpose"], c["relationships"], client)
 
     parts = [
         f"# {flow.name}",

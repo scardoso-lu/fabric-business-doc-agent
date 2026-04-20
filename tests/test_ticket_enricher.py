@@ -5,13 +5,328 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.enrichers.ticket_enricher import (
+    _SEARCH_CANDIDATES,
     _extract_jira_text,
     _fetch_azdo,
     _fetch_azdo_prs,
     _fetch_azdo_workitems,
     _fetch_jira,
+    _normalize_artifact_name,
+    _rerank_work_items,
+    _search_azdo_workitems,
+    _strip_highlight_tags,
     fetch_ticket_context,
 )
+
+
+# ---------------------------------------------------------------------------
+# _normalize_artifact_name
+# ---------------------------------------------------------------------------
+
+class TestNormalizeArtifactName:
+    def test_strips_pl_prefix(self):
+        assert _normalize_artifact_name("pl_load_customer_data") == "load customer data"
+
+    def test_strips_nb_prefix(self):
+        assert _normalize_artifact_name("nb_sales_forecast") == "sales forecast"
+
+    def test_strips_df_prefix(self):
+        assert _normalize_artifact_name("df_order_processing") == "order processing"
+
+    def test_strips_pa_prefix(self):
+        assert _normalize_artifact_name("pa_send_notification") == "send notification"
+
+    def test_strips_pipeline_prefix(self):
+        assert _normalize_artifact_name("pipeline_load_data") == "load data"
+
+    def test_strips_version_suffix(self):
+        assert _normalize_artifact_name("pl_load_data_v2") == "load data"
+
+    def test_strips_version_suffix_hyphen(self):
+        assert _normalize_artifact_name("nb_forecast-v3") == "forecast"
+
+    def test_splits_camelcase(self):
+        assert _normalize_artifact_name("LoadCustomerData") == "Load Customer Data"
+
+    def test_replaces_underscores_with_spaces(self):
+        assert _normalize_artifact_name("load_customer_data") == "load customer data"
+
+    def test_replaces_hyphens_with_spaces(self):
+        assert _normalize_artifact_name("load-customer-data") == "load customer data"
+
+    def test_prefix_and_camel(self):
+        result = _normalize_artifact_name("pl_LoadCustomerData")
+        assert "Load Customer Data" in result
+        assert "pl" not in result.lower().split()[0]
+
+    def test_no_transformation_needed(self):
+        assert _normalize_artifact_name("salesdata") == "salesdata"
+
+    def test_empty_string(self):
+        assert _normalize_artifact_name("") == ""
+
+
+# ---------------------------------------------------------------------------
+# _strip_highlight_tags
+# ---------------------------------------------------------------------------
+
+class TestStripHighlightTags:
+    def test_removes_open_and_close_tags(self):
+        result = _strip_highlight_tags(
+            "loads <highlighthit>customer data</highlighthit> from Salesforce"
+        )
+        assert result == "loads customer data from Salesforce"
+
+    def test_case_insensitive(self):
+        assert _strip_highlight_tags("<HIGHLIGHTHIT>text</HIGHLIGHTHIT>") == "text"
+
+    def test_multiple_highlights(self):
+        result = _strip_highlight_tags(
+            "<highlighthit>load</highlighthit> and <highlighthit>customer</highlighthit>"
+        )
+        assert result == "load and customer"
+
+    def test_no_tags_unchanged(self):
+        assert _strip_highlight_tags("plain text") == "plain text"
+
+    def test_empty_string(self):
+        assert _strip_highlight_tags("") == ""
+
+
+# ---------------------------------------------------------------------------
+# _search_azdo_workitems
+# ---------------------------------------------------------------------------
+
+class TestSearchAzdoWorkitems:
+    _ORG = "org"
+    _PROJECT = "proj"
+
+    def _headers(self) -> dict:
+        import base64
+        auth = base64.b64encode(b":pat").decode()
+        return {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+
+    def _make_result(
+        self,
+        wi_id="42",
+        title="Load Customer Data Pipeline",
+        wi_type="Task",
+        state="Active",
+        highlights=None,
+        description="",
+    ) -> dict:
+        result = {
+            "fields": {
+                "system.id": wi_id,
+                "system.title": title,
+                "system.workitemtype": wi_type,
+                "system.state": state,
+                "system.description": description,
+            },
+            "hits": [],
+        }
+        if highlights is not None:
+            result["hits"] = [
+                {"fieldReferenceName": "system.description", "highlights": highlights}
+            ]
+        return result
+
+    def _mock_post(self, results: list) -> MagicMock:
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"count": len(results), "results": results}
+        return resp
+
+    def test_successful_search_returns_formatted_items(self):
+        resp = self._mock_post([self._make_result(
+            highlights=["loads <highlighthit>customer data</highlighthit> from Salesforce"]
+        )])
+        with patch("requests.post", return_value=resp):
+            result = _search_azdo_workitems(
+                "pl_load_customer_data", self._ORG, self._PROJECT, self._headers()
+            )
+        assert result.startswith("Azure DevOps work items:")
+        assert "#42" in result
+        assert "Load Customer Data Pipeline" in result
+        assert "Task" in result
+        assert "Active" in result
+        assert "<highlighthit>" not in result
+        assert "customer data" in result
+
+    def test_highlight_tags_stripped(self):
+        resp = self._mock_post([self._make_result(
+            highlights=["<highlighthit>load</highlighthit> data pipeline"]
+        )])
+        with patch("requests.post", return_value=resp):
+            result = _search_azdo_workitems("load data", self._ORG, self._PROJECT, self._headers())
+        assert "<highlighthit>" not in result
+        assert "load data pipeline" in result
+
+    def test_falls_back_to_description_when_no_hits(self):
+        resp = self._mock_post([self._make_result(
+            highlights=None,
+            description="<p>Loads customer data from the data lake.</p>",
+        )])
+        with patch("requests.post", return_value=resp):
+            result = _search_azdo_workitems(
+                "customer data", self._ORG, self._PROJECT, self._headers()
+            )
+        assert "Loads customer data from the data lake." in result
+        assert "<p>" not in result
+
+    def test_empty_results_returns_empty(self):
+        resp = self._mock_post([])
+        with patch("requests.post", return_value=resp):
+            result = _search_azdo_workitems("NoMatch", self._ORG, self._PROJECT, self._headers())
+        assert result == ""
+
+    def test_http_error_returns_empty(self):
+        with patch("requests.post", side_effect=Exception("503")):
+            result = _search_azdo_workitems("Any", self._ORG, self._PROJECT, self._headers())
+        assert result == ""
+
+    def test_posts_to_search_host(self):
+        captured = {}
+        resp = self._mock_post([])
+
+        def mock_post(url, json, headers, timeout):
+            captured["url"] = url
+            return resp
+
+        with patch("requests.post", side_effect=mock_post):
+            _search_azdo_workitems("any", self._ORG, self._PROJECT, self._headers())
+
+        assert "almsearch.dev.azure.com" in captured["url"]
+        assert self._ORG in captured["url"]
+        assert self._PROJECT in captured["url"]
+
+    def test_sends_normalized_name_as_search_text(self):
+        captured = {}
+        resp = self._mock_post([])
+
+        def mock_post(url, json, headers, timeout):
+            captured["body"] = json
+            return resp
+
+        with patch("requests.post", side_effect=mock_post):
+            _search_azdo_workitems(
+                "pl_load_customer_data", self._ORG, self._PROJECT, self._headers()
+            )
+
+        assert captured["body"]["searchText"] == "load customer data"
+        assert captured["body"]["$top"] == _SEARCH_CANDIDATES
+
+    def test_top_equals_search_candidates_constant(self):
+        assert _SEARCH_CANDIDATES == 10
+
+    def test_includes_type_and_state_in_output(self):
+        resp = self._mock_post([self._make_result(wi_type="User Story", state="Resolved")])
+        with patch("requests.post", return_value=resp):
+            result = _search_azdo_workitems("any", self._ORG, self._PROJECT, self._headers())
+        assert "User Story" in result
+        assert "Resolved" in result
+
+
+# ---------------------------------------------------------------------------
+# _rerank_work_items
+# ---------------------------------------------------------------------------
+
+class TestRerankWorkItems:
+    _ITEMS = (
+        "Azure DevOps work items:\n"
+        "- [#1] Load Customer Data (Task, Active)\n"
+        "  Loads customer data from lake.\n"
+        "- [#2] Unrelated ticket (Bug, New)\n"
+        "  Something completely different."
+    )
+
+    def test_returns_original_when_no_client(self):
+        assert _rerank_work_items("pl_load_customer_data", self._ITEMS, None) == self._ITEMS
+
+    def test_calls_client_with_artifact_name_and_items(self):
+        client = MagicMock()
+        client._call.return_value = "- [#1] Load Customer Data (Task, Active)"
+        result = _rerank_work_items("pl_load_customer_data", self._ITEMS, client)
+        prompt = client._call.call_args[0][0]
+        assert "pl_load_customer_data" in prompt
+        assert "Azure DevOps work items:" in prompt
+
+    def test_reattaches_header_to_filtered_result(self):
+        client = MagicMock()
+        client._call.return_value = "- [#1] Load Customer Data (Task, Active)"
+        result = _rerank_work_items("artifact", self._ITEMS, client)
+        assert result.startswith("Azure DevOps work items:")
+        assert "- [#1]" in result
+
+    def test_falls_back_to_original_when_llm_strips_all(self):
+        client = MagicMock()
+        client._call.return_value = "None of these are relevant."
+        result = _rerank_work_items("artifact", self._ITEMS, client)
+        assert result == self._ITEMS
+
+    def test_falls_back_to_original_when_llm_returns_empty(self):
+        client = MagicMock()
+        client._call.return_value = ""
+        result = _rerank_work_items("artifact", self._ITEMS, client)
+        assert result == self._ITEMS
+
+    def test_falls_back_to_original_on_llm_exception(self):
+        client = MagicMock()
+        client._call.side_effect = RuntimeError("LLM unavailable")
+        result = _rerank_work_items("artifact", self._ITEMS, client)
+        assert result == self._ITEMS
+
+
+# ---------------------------------------------------------------------------
+# _fetch_azdo — fallback and re-rank integration
+# ---------------------------------------------------------------------------
+
+class TestFetchAzdoFallbackAndRerank:
+    @pytest.fixture(autouse=True)
+    def _set_env(self, monkeypatch):
+        monkeypatch.setenv("AZDO_ORG", "org")
+        monkeypatch.setenv("AZDO_PROJECT", "proj")
+        monkeypatch.setenv("AZDO_PAT", "pat")
+
+    def test_falls_back_to_wiql_when_search_returns_empty(self):
+        wiql_result = "Azure DevOps work items:\n- [#7] Fallback Item"
+        with patch("agent.enrichers.ticket_enricher._search_azdo_workitems", return_value="") as ms, \
+             patch("agent.enrichers.ticket_enricher._fetch_azdo_workitems", return_value=wiql_result) as mw, \
+             patch("agent.enrichers.ticket_enricher._fetch_azdo_prs", return_value=""), \
+             patch("agent.enrichers.ticket_enricher._rerank_work_items", side_effect=lambda n, t, c: t):
+            result = _fetch_azdo("MyPipeline")
+        ms.assert_called_once()
+        mw.assert_called_once()
+        assert "Fallback Item" in result
+
+    def test_wiql_not_called_when_search_succeeds(self):
+        search_result = "Azure DevOps work items:\n- [#42] Search Result"
+        with patch("agent.enrichers.ticket_enricher._search_azdo_workitems", return_value=search_result) as ms, \
+             patch("agent.enrichers.ticket_enricher._fetch_azdo_workitems", return_value="should not appear") as mw, \
+             patch("agent.enrichers.ticket_enricher._fetch_azdo_prs", return_value=""), \
+             patch("agent.enrichers.ticket_enricher._rerank_work_items", side_effect=lambda n, t, c: t):
+            result = _fetch_azdo("MyPipeline")
+        ms.assert_called_once()
+        mw.assert_not_called()
+        assert "Search Result" in result
+        assert "should not appear" not in result
+
+    def test_rerank_called_with_client(self):
+        client = MagicMock()
+        search_result = "Azure DevOps work items:\n- [#1] Item"
+        with patch("agent.enrichers.ticket_enricher._search_azdo_workitems", return_value=search_result), \
+             patch("agent.enrichers.ticket_enricher._fetch_azdo_prs", return_value=""), \
+             patch("agent.enrichers.ticket_enricher._rerank_work_items", return_value=search_result) as mr:
+            _fetch_azdo("MyPipeline", client)
+        mr.assert_called_once_with("MyPipeline", search_result, client)
+
+    def test_rerank_not_called_when_no_work_items(self):
+        with patch("agent.enrichers.ticket_enricher._search_azdo_workitems", return_value=""), \
+             patch("agent.enrichers.ticket_enricher._fetch_azdo_workitems", return_value=""), \
+             patch("agent.enrichers.ticket_enricher._fetch_azdo_prs", return_value=""), \
+             patch("agent.enrichers.ticket_enricher._rerank_work_items") as mr:
+            _fetch_azdo("MyPipeline")
+        mr.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +445,24 @@ class TestFetchJiraConfigured:
             _fetch_jira("PipelineX")
         assert "project = MYPROJ" in captured["jql"]
 
+    def test_jql_includes_normalized_name_for_prefixed_artifact(self, monkeypatch):
+        monkeypatch.delenv("JIRA_PROJECT_KEY", raising=False)
+        captured = {}
+
+        def mock_get(url, headers, params, timeout):
+            captured["jql"] = params["jql"]
+            resp = MagicMock()
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = {"issues": []}
+            return resp
+
+        with patch("requests.get", side_effect=mock_get):
+            _fetch_jira("pl_load_customer_data")
+
+        jql = captured["jql"]
+        assert "pl_load_customer_data" in jql
+        assert "load customer data" in jql
+
 
 # ---------------------------------------------------------------------------
 # _fetch_azdo — not configured
@@ -150,7 +483,7 @@ class TestFetchAzdoNotConfigured:
 
 
 # ---------------------------------------------------------------------------
-# _fetch_azdo_workitems — mocked HTTP
+# _fetch_azdo_workitems — mocked HTTP (WIQL fallback)
 # ---------------------------------------------------------------------------
 
 class TestFetchAzdoWorkitems:
@@ -221,6 +554,39 @@ class TestFetchAzdoWorkitems:
             result = _fetch_azdo_workitems("X", self._BASE, self._headers())
         assert result == ""
 
+    def test_wiql_uses_contains_words_with_normalized_name(self):
+        captured = {}
+        wiql_resp = MagicMock()
+        wiql_resp.raise_for_status.return_value = None
+        wiql_resp.json.return_value = {"workItems": []}
+
+        def mock_post(url, json, headers, timeout):
+            captured["query"] = json["query"]
+            return wiql_resp
+
+        with patch("requests.post", side_effect=mock_post):
+            _fetch_azdo_workitems("pl_load_customer_data", self._BASE, self._headers())
+
+        query = captured["query"]
+        assert "CONTAINS WORDS" in query
+        assert "load customer data" in query.lower()
+
+    def test_wiql_no_or_when_name_unchanged_by_normalisation(self):
+        captured = {}
+        wiql_resp = MagicMock()
+        wiql_resp.raise_for_status.return_value = None
+        wiql_resp.json.return_value = {"workItems": []}
+
+        def mock_post(url, json, headers, timeout):
+            captured["query"] = json["query"]
+            return wiql_resp
+
+        with patch("requests.post", side_effect=mock_post):
+            _fetch_azdo_workitems("salesdata", self._BASE, self._headers())
+
+        assert "CONTAINS WORDS" not in captured["query"]
+        assert "salesdata" in captured["query"]
+
 
 # ---------------------------------------------------------------------------
 # _fetch_azdo_prs — mocked HTTP
@@ -252,6 +618,21 @@ class TestFetchAzdoPRs:
         assert "PR #99" in result
         assert "Add SalesPipeline" in result
 
+    def test_pr_search_uses_normalized_title(self):
+        captured = {}
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"value": []}
+
+        def mock_get(url, params, headers, timeout):
+            captured["title"] = params.get("searchCriteria.title")
+            return resp
+
+        with patch("requests.get", side_effect=mock_get):
+            _fetch_azdo_prs("pl_load_customer_data", self._BASE, self._headers())
+
+        assert captured["title"] == "load customer data"
+
     def test_http_error_returns_empty(self):
         with patch("requests.get", side_effect=Exception("timeout")):
             assert _fetch_azdo_prs("X", self._BASE, self._headers()) == ""
@@ -282,7 +663,19 @@ class TestFetchTicketContext:
         assert "Jira issues:" in result
         assert "Azure DevOps work items:" in result
         mj.assert_called_once_with("Artifact")
-        ma.assert_called_once_with("Artifact")
+        ma.assert_called_once_with("Artifact", None)
+
+    def test_passes_client_to_fetch_azdo(self, monkeypatch):
+        monkeypatch.setenv("AZDO_ORG", "org")
+        monkeypatch.setenv("AZDO_PROJECT", "proj")
+        monkeypatch.setenv("AZDO_PAT", "pat")
+        client = MagicMock()
+
+        with patch("agent.enrichers.ticket_enricher._fetch_jira", return_value=""), \
+             patch("agent.enrichers.ticket_enricher._fetch_azdo", return_value="") as ma:
+            fetch_ticket_context("Artifact", client)
+
+        ma.assert_called_once_with("Artifact", client)
 
     def test_skips_empty_backends(self, monkeypatch):
         for var in ("AZDO_ORG", "AZDO_PROJECT", "AZDO_PAT"):
