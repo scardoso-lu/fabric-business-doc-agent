@@ -17,6 +17,7 @@ from agent.enrichers.ticket_enricher import (
     _rerank_work_items,
     _search_azdo_workitems,
     _strip_highlight_tags,
+    _verify_pr_touches_artifact,
     fetch_ticket_context,
 )
 
@@ -639,6 +640,141 @@ class TestFetchAzdoPRs:
         with patch("requests.get", side_effect=Exception("timeout")):
             assert _fetch_azdo_prs("X", self._BASE, self._headers()) == ""
 
+    def test_excludes_pr_whose_files_do_not_match_artifact(self):
+        pr_resp = MagicMock()
+        pr_resp.raise_for_status.return_value = None
+        pr_resp.json.return_value = {
+            "value": [{"pullRequestId": 77, "title": "Unrelated change", "repository": {"id": "repo-1"}}]
+        }
+        with patch("requests.get", return_value=pr_resp), \
+             patch(
+                 "agent.enrichers.ticket_enricher._verify_pr_touches_artifact",
+                 return_value=False,
+             ):
+            result = _fetch_azdo_prs("pl_load_customer_data", self._BASE, self._headers())
+        assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# _verify_pr_touches_artifact
+# ---------------------------------------------------------------------------
+
+class TestVerifyPrTouchesArtifact:
+    _BASE = "https://dev.azure.com/org/proj/_apis"
+    _REPO = "repo-abc-123"
+
+    def _headers(self) -> dict:
+        import base64
+        auth = base64.b64encode(b":pat").decode()
+        return {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+
+    def _iter_resp(self, iteration_id: int = 1) -> MagicMock:
+        m = MagicMock()
+        m.raise_for_status.return_value = None
+        m.json.return_value = {"value": [{"id": iteration_id}]}
+        return m
+
+    def _changes_resp(self, paths: list[str]) -> MagicMock:
+        m = MagicMock()
+        m.raise_for_status.return_value = None
+        m.json.return_value = {
+            "changeEntries": [
+                {"item": {"path": p, "isFolder": False}}
+                for p in paths
+            ]
+        }
+        return m
+
+    def test_returns_true_when_artifact_name_in_changed_file(self):
+        with patch("requests.get", side_effect=[
+            self._iter_resp(1),
+            self._changes_resp(["/Pipelines/pl_load_customer_data/pipeline-content.json"]),
+        ]):
+            result = _verify_pr_touches_artifact(
+                42, self._REPO, "pl_load_customer_data", self._BASE, self._headers()
+            )
+        assert result is True
+
+    def test_returns_false_when_artifact_name_not_in_any_changed_file(self):
+        with patch("requests.get", side_effect=[
+            self._iter_resp(1),
+            self._changes_resp(["/Pipelines/pl_other_pipeline/pipeline-content.json"]),
+        ]):
+            result = _verify_pr_touches_artifact(
+                42, self._REPO, "pl_load_customer_data", self._BASE, self._headers()
+            )
+        assert result is False
+
+    def test_case_insensitive_path_match(self):
+        with patch("requests.get", side_effect=[
+            self._iter_resp(1),
+            self._changes_resp(["/Pipelines/PL_Load_Customer_Data/pipeline-content.json"]),
+        ]):
+            result = _verify_pr_touches_artifact(
+                42, self._REPO, "pl_load_customer_data", self._BASE, self._headers()
+            )
+        assert result is True
+
+    def test_skips_folder_entries(self):
+        changes = MagicMock()
+        changes.raise_for_status.return_value = None
+        changes.json.return_value = {
+            "changeEntries": [
+                {"item": {"path": "/Pipelines/pl_load_customer_data", "isFolder": True}},
+            ]
+        }
+        with patch("requests.get", side_effect=[self._iter_resp(1), changes]):
+            result = _verify_pr_touches_artifact(
+                42, self._REPO, "pl_load_customer_data", self._BASE, self._headers()
+            )
+        assert result is False  # folder entry is skipped, no file match
+
+    def test_fails_open_when_no_repo_id(self):
+        result = _verify_pr_touches_artifact(
+            42, "", "pl_load_customer_data", self._BASE, self._headers()
+        )
+        assert result is True
+
+    def test_fails_open_on_iterations_api_error(self):
+        with patch("requests.get", side_effect=Exception("network error")):
+            result = _verify_pr_touches_artifact(
+                42, self._REPO, "pl_load_customer_data", self._BASE, self._headers()
+            )
+        assert result is True
+
+    def test_fails_open_when_no_iterations(self):
+        empty_iter = MagicMock()
+        empty_iter.raise_for_status.return_value = None
+        empty_iter.json.return_value = {"value": []}
+        with patch("requests.get", return_value=empty_iter):
+            result = _verify_pr_touches_artifact(
+                42, self._REPO, "pl_load_customer_data", self._BASE, self._headers()
+            )
+        assert result is True
+
+    def test_uses_latest_iteration(self):
+        """Verification must use the latest iteration, not always iteration 1."""
+        captured = {}
+
+        def mock_get(url, params=None, **kwargs):
+            if "iterations" in url and "changes" not in url:
+                m = MagicMock()
+                m.raise_for_status.return_value = None
+                m.json.return_value = {"value": [{"id": 1}, {"id": 2}, {"id": 3}]}
+                return m
+            captured["url"] = url
+            m = MagicMock()
+            m.raise_for_status.return_value = None
+            m.json.return_value = {"changeEntries": []}
+            return m
+
+        with patch("requests.get", side_effect=mock_get):
+            _verify_pr_touches_artifact(
+                42, self._REPO, "any", self._BASE, self._headers()
+            )
+
+        assert "/iterations/3/changes" in captured.get("url", "")
+
 
 # ---------------------------------------------------------------------------
 # _fetch_pr_linked_workitems
@@ -842,6 +978,37 @@ class TestBuildPrWorkitemContext:
 
         with patch("requests.get", side_effect=mock_get):
             assert _build_pr_workitem_context("X", self._BASE, self._headers()) == ""
+
+    def test_excludes_prs_that_do_not_touch_artifact_files(self):
+        """PRs that match by name but modify unrelated files must be filtered out."""
+        pr = {"pullRequestId": 7, "title": "PR", "description": "", "repository": {"id": "repo1"}}
+
+        def mock_get(url, **kwargs):
+            if "pullrequests" in url and "workitems" not in url and "iterations" not in url:
+                return self._pr_resp([pr])
+            if "iterations" in url and "changes" not in url:
+                m = MagicMock()
+                m.raise_for_status.return_value = None
+                m.json.return_value = {"value": [{"id": 1}]}
+                return m
+            if "changes" in url:
+                m = MagicMock()
+                m.raise_for_status.return_value = None
+                m.json.return_value = {
+                    "changeEntries": [
+                        {"item": {"path": "/Pipelines/pl_other_pipeline/file.json", "isFolder": False}}
+                    ]
+                }
+                return m
+            m = MagicMock()
+            m.raise_for_status.return_value = None
+            m.json.return_value = {"value": []}
+            return m
+
+        with patch("requests.get", side_effect=mock_get):
+            result = _build_pr_workitem_context("pl_my_pipeline", self._BASE, self._headers())
+
+        assert result == ""
 
     def test_uses_normalized_name_for_pr_search(self):
         captured = {}

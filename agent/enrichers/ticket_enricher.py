@@ -297,6 +297,61 @@ def _rerank_work_items(artifact_name: str, items_text: str, client) -> str:
         return items_text
 
 
+def _verify_pr_touches_artifact(
+    pr_id: int, repo_id: str, artifact_name: str, base_url: str, headers: dict
+) -> bool:
+    """Return True only if the PR modifies files that belong to *artifact_name*.
+
+    Calls the ADO iterations API to get the latest set of changed files and
+    checks whether the artifact's technical name (e.g. ``pl_load_customer_data``)
+    appears in any of those file paths.  This prevents PRs that happen to share
+    keywords with an artifact name from being wrongly attributed to it.
+
+    Fails open (returns True) on any API error so a network hiccup never
+    silently discards valid context.
+    """
+    if not repo_id:
+        return True  # can't verify without a repo ID
+
+    artifact_lower = artifact_name.lower()
+    try:
+        # Step 1: get the list of iterations and take the latest one
+        iter_resp = requests.get(
+            f"{base_url}/git/repositories/{repo_id}/pullRequests/{pr_id}/iterations",
+            params={"api-version": "7.1"},
+            headers=headers,
+            timeout=_TIMEOUT,
+        )
+        iter_resp.raise_for_status()
+        iterations = iter_resp.json().get("value", [])
+        if not iterations:
+            return True  # no iteration data — fail open
+
+        latest_iter_id = iterations[-1]["id"]
+
+        # Step 2: get changed file paths for that iteration
+        changes_resp = requests.get(
+            f"{base_url}/git/repositories/{repo_id}"
+            f"/pullRequests/{pr_id}/iterations/{latest_iter_id}/changes",
+            params={"api-version": "7.1"},
+            headers=headers,
+            timeout=_TIMEOUT,
+        )
+        changes_resp.raise_for_status()
+        entries = changes_resp.json().get("changeEntries", [])
+
+        for entry in entries:
+            item = entry.get("item", {})
+            if item.get("isFolder"):
+                continue
+            if artifact_lower in item.get("path", "").lower():
+                return True
+
+        return False  # PR touched no files related to this artifact
+    except Exception:
+        return True  # fail open — don't silently drop context on errors
+
+
 def _fetch_pr_linked_workitems(pr_id: int, base_url: str, headers: dict) -> list[int]:
     """Return the IDs of work items explicitly linked to *pr_id*.
 
@@ -358,14 +413,21 @@ def _build_pr_workitem_context(name: str, base_url: str, headers: dict) -> str:
     if not prs:
         return ""
 
-    # Collect linked WI IDs per PR (deduplicated across PRs)
+    # Collect linked WI IDs per PR (deduplicated across PRs).
+    # Each PR is first verified to have actually modified this artifact's files
+    # so that PRs matched only by name similarity are excluded.
     pr_wi_map: dict[int, list[int]] = {}
     all_wi_ids: list[int] = []
     seen: set[int] = set()
+    verified_prs: list[dict] = []
     for pr in prs:
         pr_id = pr.get("pullRequestId")
         if pr_id is None:
             continue
+        repo_id = pr.get("repository", {}).get("id", "")
+        if not _verify_pr_touches_artifact(pr_id, repo_id, name, base_url, headers):
+            continue  # PR matched by keyword but doesn't touch this artifact's files
+        verified_prs.append(pr)
         wi_ids = _fetch_pr_linked_workitems(pr_id, base_url, headers)
         pr_wi_map[pr_id] = wi_ids
         for wi_id in wi_ids:
@@ -401,7 +463,7 @@ def _build_pr_workitem_context(name: str, base_url: str, headers: dict) -> str:
         return ""
 
     lines = ["Azure DevOps pull requests with linked work items:"]
-    for pr in prs:
+    for pr in verified_prs:
         pr_id = pr.get("pullRequestId", "")
         pr_title = pr.get("title", "")
         pr_desc = (pr.get("description", "") or "").strip()[:300]
@@ -525,12 +587,15 @@ def _fetch_azdo_prs(name: str, base_url: str, headers: dict) -> str:
         lines = ["Azure DevOps pull requests:"]
         for pr in prs:
             pr_id = pr.get("pullRequestId", "")
+            repo_id = pr.get("repository", {}).get("id", "")
+            if not _verify_pr_touches_artifact(pr_id, repo_id, name, base_url, headers):
+                continue
             title = pr.get("title", "")
             desc = (pr.get("description", "") or "")[:200]
             line = f"- [PR #{pr_id}] {title}"
             if desc:
                 line += f"\n  {desc}"
             lines.append(line)
-        return "\n".join(lines)
+        return "\n".join(lines) if len(lines) > 1 else ""
     except Exception:
         return ""
