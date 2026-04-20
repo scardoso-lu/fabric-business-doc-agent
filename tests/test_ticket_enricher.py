@@ -6,11 +6,13 @@ import pytest
 
 from agent.enrichers.ticket_enricher import (
     _SEARCH_CANDIDATES,
+    _build_pr_workitem_context,
     _extract_jira_text,
     _fetch_azdo,
     _fetch_azdo_prs,
     _fetch_azdo_workitems,
     _fetch_jira,
+    _fetch_pr_linked_workitems,
     _normalize_artifact_name,
     _rerank_work_items,
     _search_azdo_workitems,
@@ -636,6 +638,267 @@ class TestFetchAzdoPRs:
     def test_http_error_returns_empty(self):
         with patch("requests.get", side_effect=Exception("timeout")):
             assert _fetch_azdo_prs("X", self._BASE, self._headers()) == ""
+
+
+# ---------------------------------------------------------------------------
+# _fetch_pr_linked_workitems
+# ---------------------------------------------------------------------------
+
+class TestFetchPrLinkedWorkitems:
+    _BASE = "https://dev.azure.com/org/proj/_apis"
+
+    def _headers(self) -> dict:
+        import base64
+        auth = base64.b64encode(b":pat").decode()
+        return {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+
+    def test_returns_list_of_ids(self):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"value": [{"id": 101}, {"id": 102}]}
+        with patch("requests.get", return_value=resp):
+            result = _fetch_pr_linked_workitems(42, self._BASE, self._headers())
+        assert result == [101, 102]
+
+    def test_empty_value_returns_empty_list(self):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"value": []}
+        with patch("requests.get", return_value=resp):
+            assert _fetch_pr_linked_workitems(42, self._BASE, self._headers()) == []
+
+    def test_http_error_returns_empty_list(self):
+        with patch("requests.get", side_effect=Exception("network error")):
+            assert _fetch_pr_linked_workitems(42, self._BASE, self._headers()) == []
+
+    def test_calls_correct_endpoint(self):
+        captured = {}
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"value": []}
+
+        def mock_get(url, params, headers, timeout):
+            captured["url"] = url
+            return resp
+
+        with patch("requests.get", side_effect=mock_get):
+            _fetch_pr_linked_workitems(99, self._BASE, self._headers())
+
+        assert "/git/pullrequests/99/workitems" in captured["url"]
+
+
+# ---------------------------------------------------------------------------
+# _build_pr_workitem_context
+# ---------------------------------------------------------------------------
+
+class TestBuildPrWorkitemContext:
+    _BASE = "https://dev.azure.com/org/proj/_apis"
+
+    def _headers(self) -> dict:
+        import base64
+        auth = base64.b64encode(b":pat").decode()
+        return {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+
+    def _pr_resp(self, prs: list) -> MagicMock:
+        m = MagicMock()
+        m.raise_for_status.return_value = None
+        m.json.return_value = {"value": prs}
+        return m
+
+    def _wi_resp(self, items: list) -> MagicMock:
+        m = MagicMock()
+        m.raise_for_status.return_value = None
+        m.json.return_value = {"value": items}
+        return m
+
+    def test_returns_empty_when_no_prs(self):
+        with patch("requests.get", return_value=self._pr_resp([])):
+            assert _build_pr_workitem_context("MyPipeline", self._BASE, self._headers()) == ""
+
+    def test_returns_empty_when_prs_have_no_linked_workitems(self):
+        pr = {"pullRequestId": 1, "title": "My PR", "description": ""}
+        wi_empty = MagicMock()
+        wi_empty.raise_for_status.return_value = None
+        wi_empty.json.return_value = {"value": []}
+
+        def mock_get(url, **kwargs):
+            if "workitems" in url and "pullrequests" in url:
+                return wi_empty
+            return self._pr_resp([pr])
+
+        with patch("requests.get", side_effect=mock_get):
+            assert _build_pr_workitem_context("MyPipeline", self._BASE, self._headers()) == ""
+
+    def test_returns_combined_context_when_linked_workitems_found(self):
+        pr = {"pullRequestId": 42, "title": "Load customer data", "description": "Implements load"}
+        wi_linked = MagicMock()
+        wi_linked.raise_for_status.return_value = None
+        wi_linked.json.return_value = {"value": [{"id": 101}]}
+        wi_details = self._wi_resp([{
+            "id": 101,
+            "fields": {
+                "System.Title": "Daily customer load",
+                "System.Description": "Load Salesforce data daily.",
+                "Microsoft.VSTS.Common.AcceptanceCriteria": "Must complete by 06:00 UTC.",
+            }
+        }])
+
+        call_count = {"n": 0}
+
+        def mock_get(url, **kwargs):
+            call_count["n"] += 1
+            if "pullrequests/42/workitems" in url:
+                return wi_linked
+            if "wit/workitems" in url:
+                return wi_details
+            return self._pr_resp([pr])
+
+        with patch("requests.get", side_effect=mock_get):
+            result = _build_pr_workitem_context("pl_load_customer_data", self._BASE, self._headers())
+
+        assert result.startswith("Azure DevOps pull requests with linked work items:")
+        assert "PR #42" in result
+        assert "Load customer data" in result
+        assert "Implements load" in result
+        assert "#101" in result
+        assert "Daily customer load" in result
+        assert "Load Salesforce data daily." in result
+        assert "Acceptance criteria:" in result
+        assert "Must complete by 06:00 UTC." in result
+
+    def test_html_stripped_from_workitem_description(self):
+        pr = {"pullRequestId": 1, "title": "PR", "description": ""}
+        wi_linked = MagicMock()
+        wi_linked.raise_for_status.return_value = None
+        wi_linked.json.return_value = {"value": [{"id": 5}]}
+        wi_details = self._wi_resp([{
+            "id": 5,
+            "fields": {
+                "System.Title": "Fix",
+                "System.Description": "<p>Load <b>customer</b> data.</p>",
+                "Microsoft.VSTS.Common.AcceptanceCriteria": "",
+            }
+        }])
+
+        def mock_get(url, **kwargs):
+            if "pullrequests/1/workitems" in url:
+                return wi_linked
+            if "wit/workitems" in url:
+                return wi_details
+            return self._pr_resp([pr])
+
+        with patch("requests.get", side_effect=mock_get):
+            result = _build_pr_workitem_context("Fix", self._BASE, self._headers())
+
+        assert "<p>" not in result
+        assert "<b>" not in result
+        assert "customer" in result
+
+    def test_acceptance_criteria_omitted_when_empty(self):
+        pr = {"pullRequestId": 1, "title": "PR", "description": ""}
+        wi_linked = MagicMock()
+        wi_linked.raise_for_status.return_value = None
+        wi_linked.json.return_value = {"value": [{"id": 5}]}
+        wi_details = self._wi_resp([{
+            "id": 5,
+            "fields": {
+                "System.Title": "Task",
+                "System.Description": "Do something.",
+                "Microsoft.VSTS.Common.AcceptanceCriteria": "",
+            }
+        }])
+
+        def mock_get(url, **kwargs):
+            if "pullrequests/1/workitems" in url:
+                return wi_linked
+            if "wit/workitems" in url:
+                return wi_details
+            return self._pr_resp([pr])
+
+        with patch("requests.get", side_effect=mock_get):
+            result = _build_pr_workitem_context("Task", self._BASE, self._headers())
+
+        assert "Acceptance criteria:" not in result
+
+    def test_pr_api_failure_returns_empty(self):
+        with patch("requests.get", side_effect=Exception("timeout")):
+            assert _build_pr_workitem_context("X", self._BASE, self._headers()) == ""
+
+    def test_wi_details_failure_returns_empty(self):
+        pr = {"pullRequestId": 1, "title": "PR", "description": ""}
+        wi_linked = MagicMock()
+        wi_linked.raise_for_status.return_value = None
+        wi_linked.json.return_value = {"value": [{"id": 5}]}
+
+        call_n = {"n": 0}
+
+        def mock_get(url, **kwargs):
+            call_n["n"] += 1
+            if "pullrequests/1/workitems" in url:
+                return wi_linked
+            if "wit/workitems" in url:
+                raise Exception("API error")
+            return self._pr_resp([pr])
+
+        with patch("requests.get", side_effect=mock_get):
+            assert _build_pr_workitem_context("X", self._BASE, self._headers()) == ""
+
+    def test_uses_normalized_name_for_pr_search(self):
+        captured = {}
+        resp_empty = MagicMock()
+        resp_empty.raise_for_status.return_value = None
+        resp_empty.json.return_value = {"value": []}
+
+        def mock_get(url, params=None, **kwargs):
+            if "pullrequests" in url and "workitems" not in url:
+                captured["title"] = (params or {}).get("searchCriteria.title")
+            return resp_empty
+
+        with patch("requests.get", side_effect=mock_get):
+            _build_pr_workitem_context("pl_load_customer_data", self._BASE, self._headers())
+
+        assert captured.get("title") == "load customer data"
+
+
+# ---------------------------------------------------------------------------
+# _fetch_azdo — PR deep-dive takes priority over Search API
+# ---------------------------------------------------------------------------
+
+class TestFetchAzdoPrPriority:
+    @pytest.fixture(autouse=True)
+    def _set_env(self, monkeypatch):
+        monkeypatch.setenv("AZDO_ORG", "org")
+        monkeypatch.setenv("AZDO_PROJECT", "proj")
+        monkeypatch.setenv("AZDO_PAT", "pat")
+
+    def test_returns_pr_wi_context_and_skips_search_when_linked_wis_found(self):
+        pr_wi_result = "Azure DevOps pull requests with linked work items:\n- [PR #1] My PR\n  - [#10] Task"
+
+        with patch("agent.enrichers.ticket_enricher._build_pr_workitem_context",
+                   return_value=pr_wi_result) as mock_pr_wi, \
+             patch("agent.enrichers.ticket_enricher._search_azdo_workitems",
+                   return_value="should not appear") as mock_search, \
+             patch("agent.enrichers.ticket_enricher._fetch_azdo_prs",
+                   return_value="should not appear") as mock_prs:
+            result = _fetch_azdo("MyPipeline")
+
+        mock_pr_wi.assert_called_once()
+        mock_search.assert_not_called()
+        mock_prs.assert_not_called()
+        assert pr_wi_result == result
+
+    def test_falls_back_to_search_when_no_linked_wis(self):
+        with patch("agent.enrichers.ticket_enricher._build_pr_workitem_context",
+                   return_value="") as mock_pr_wi, \
+             patch("agent.enrichers.ticket_enricher._search_azdo_workitems",
+                   return_value="Azure DevOps work items:\n- [#42] Found via search") as mock_search, \
+             patch("agent.enrichers.ticket_enricher._fetch_azdo_prs",
+                   return_value=""):
+            result = _fetch_azdo("MyPipeline")
+
+        mock_pr_wi.assert_called_once()
+        mock_search.assert_called_once()
+        assert "Found via search" in result
 
 
 # ---------------------------------------------------------------------------

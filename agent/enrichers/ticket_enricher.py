@@ -9,12 +9,16 @@ Returns a plain-text summary of found items, or an empty string when nothing
 is found or neither backend is configured. The caller is responsible for
 deciding how to use the context (e.g. prepend to purpose content).
 
-Work item search strategy (Azure DevOps):
-  1. ADO Search REST API (almsearch.dev.azure.com) — full-text across all fields,
+Azure DevOps enrichment strategy (in priority order):
+  1. PR → linked work items  (highest quality — explicit developer connections).
+     Finds PRs matching the artifact name, then fetches the work items explicitly
+     linked to each PR.  When at least one linked item is found the combined
+     PR-plus-work-item context is returned immediately and steps 2-4 are skipped.
+  2. ADO Search REST API (almsearch.dev.azure.com) — full-text across all fields,
      fetches up to _SEARCH_CANDIDATES results.
-  2. LLM re-ranking — the already-running LLM client filters the candidates down
+  3. LLM re-ranking — the already-running LLM client filters the candidates down
      to those genuinely relevant to the artifact (skipped when client is None).
-  3. WIQL fallback — used when the Search API is unavailable (e.g. on-premises
+  4. WIQL fallback — used when the Search API is unavailable (e.g. on-premises
      ADO Server without Search enabled).
 """
 
@@ -29,6 +33,10 @@ import requests
 _MAX_RESULTS = 5          # WIQL fallback and PR search result cap
 _SEARCH_CANDIDATES = 10   # wider net for Search API before LLM re-ranking
 _TIMEOUT = 10
+
+# Work item fields fetched when resolving PR-linked items.
+# AcceptanceCriteria captures business intent directly from the ticket.
+_PR_WI_FIELDS = "System.Title,System.Description,Microsoft.VSTS.Common.AcceptanceCriteria"
 
 # Common Fabric/Power Automate type prefixes that are never part of the business name
 _PREFIX_RE = re.compile(
@@ -178,9 +186,16 @@ def _fetch_azdo(name: str, client=None) -> str:
     }
     base_url = f"https://dev.azure.com/{org}/{project}/_apis"
 
+    # Primary path: PRs with explicitly linked work items.
+    # Explicit developer links are higher-quality signal than keyword search,
+    # so when found we return immediately and skip the Search API entirely.
+    pr_wi_ctx = _build_pr_workitem_context(name, base_url, headers)
+    if pr_wi_ctx:
+        return pr_wi_ctx
+
+    # Fallback path: full-text Search API → LLM re-rank → WIQL → bare PRs.
     parts: list[str] = []
 
-    # Search API first (full-text, all fields); WIQL as fallback
     wi_ctx = _search_azdo_workitems(name, org, project, headers)
     if not wi_ctx:
         wi_ctx = _fetch_azdo_workitems(name, base_url, headers)
@@ -280,6 +295,146 @@ def _rerank_work_items(artifact_name: str, items_text: str, client) -> str:
         return "Azure DevOps work items:\n" + filtered.strip()
     except Exception:
         return items_text
+
+
+def _fetch_pr_linked_workitems(pr_id: int, base_url: str, headers: dict) -> list[int]:
+    """Return the IDs of work items explicitly linked to *pr_id*.
+
+    Uses GET /git/pullrequests/{id}/workitems which returns only items the
+    developer deliberately associated with the PR — a much stronger signal
+    than keyword-based search.
+    """
+    try:
+        resp = requests.get(
+            f"{base_url}/git/pullrequests/{pr_id}/workitems",
+            params={"api-version": "7.1"},
+            headers=headers,
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return [wi["id"] for wi in resp.json().get("value", [])]
+    except Exception:
+        return []
+
+
+def _build_pr_workitem_context(name: str, base_url: str, headers: dict) -> str:
+    """Find PRs for *name*, fetch their linked work items, and return a combined context block.
+
+    This is the primary enrichment path.  Because developers explicitly link
+    work items to PRs, the association is far more reliable than keyword
+    search.  Returns '' if no PRs are found or none have linked work items,
+    so the caller can fall back to the Search API.
+
+    Output format::
+
+        Azure DevOps pull requests with linked work items:
+        - [PR #42] Load customer data into silver layer
+          Implements the daily Salesforce → silver load described in #101.
+          - [#101] Load customer data daily
+            Loads Salesforce customer records into the silver lakehouse table.
+            Acceptance criteria: Data must be loaded by 06:00 UTC each day.
+          - [#108] Fix null handling in customer load
+    """
+    normalized = _normalize_artifact_name(name)
+    search_title = normalized if normalized else name
+
+    try:
+        resp = requests.get(
+            f"{base_url}/git/pullrequests",
+            params={
+                "searchCriteria.status": "all",
+                "searchCriteria.title": search_title,
+                "$top": _MAX_RESULTS,
+                "api-version": "7.1",
+            },
+            headers=headers,
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        prs = resp.json().get("value", [])
+    except Exception:
+        return ""
+
+    if not prs:
+        return ""
+
+    # Collect linked WI IDs per PR (deduplicated across PRs)
+    pr_wi_map: dict[int, list[int]] = {}
+    all_wi_ids: list[int] = []
+    seen: set[int] = set()
+    for pr in prs:
+        pr_id = pr.get("pullRequestId")
+        if pr_id is None:
+            continue
+        wi_ids = _fetch_pr_linked_workitems(pr_id, base_url, headers)
+        pr_wi_map[pr_id] = wi_ids
+        for wi_id in wi_ids:
+            if wi_id not in seen:
+                all_wi_ids.append(wi_id)
+                seen.add(wi_id)
+
+    if not all_wi_ids:
+        # PRs found but none have linked work items — fall back to Search API
+        return ""
+
+    # Fetch full details for every linked WI (cap at 20 to bound prompt size)
+    try:
+        resp2 = requests.get(
+            f"{base_url}/wit/workitems",
+            params={
+                "ids": ",".join(str(i) for i in all_wi_ids[:20]),
+                "fields": _PR_WI_FIELDS,
+                "api-version": "7.1",
+            },
+            headers=headers,
+            timeout=_TIMEOUT,
+        )
+        resp2.raise_for_status()
+        wi_details: dict[int, dict] = {
+            item["id"]: item.get("fields", {})
+            for item in resp2.json().get("value", [])
+        }
+    except Exception:
+        wi_details = {}
+
+    if not wi_details:
+        return ""
+
+    lines = ["Azure DevOps pull requests with linked work items:"]
+    for pr in prs:
+        pr_id = pr.get("pullRequestId", "")
+        pr_title = pr.get("title", "")
+        pr_desc = (pr.get("description", "") or "").strip()[:300]
+        wi_ids = pr_wi_map.get(pr_id, [])
+
+        pr_line = f"- [PR #{pr_id}] {pr_title}"
+        if pr_desc:
+            pr_line += f"\n  {pr_desc}"
+        lines.append(pr_line)
+
+        for wi_id in wi_ids:
+            fields = wi_details.get(wi_id, {})
+            if not fields:
+                continue
+            wi_title = fields.get("System.Title", "")
+            wi_desc = re.sub(
+                r"<[^>]+>", " ", fields.get("System.Description", "") or ""
+            ).strip()
+            wi_ac = re.sub(
+                r"<[^>]+>", " ",
+                fields.get("Microsoft.VSTS.Common.AcceptanceCriteria", "") or "",
+            ).strip()
+
+            wi_line = f"  - [#{wi_id}] {wi_title}"
+            if wi_desc:
+                wi_line += f"\n    {wi_desc[:200]}"
+            if wi_ac:
+                wi_line += f"\n    Acceptance criteria: {wi_ac[:200]}"
+            lines.append(wi_line)
+
+    if len(lines) <= 1:
+        return ""
+    return "\n".join(lines)
 
 
 def _fetch_azdo_workitems(name: str, base_url: str, headers: dict) -> str:
