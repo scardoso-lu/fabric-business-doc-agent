@@ -110,11 +110,28 @@ Set `LLM_PROVIDER` in `.env` to choose how the agent calls the LLM.
 | `LLM_PROVIDER` | What you need | RAG | Notes |
 | --- | --- | --- | --- |
 | `local` | [Claude CLI](https://claude.ai/code) installed | No | Calls `claude -p` as a subprocess. No API key or embeddings needed. **Best for getting started.** |
+| `copilot` | [GitHub CLI](https://cli.github.com) + `gh copilot` extension + active Copilot subscription | No | Calls `gh copilot explain` as a subprocess. No API key needed — authentication handled by `gh auth`. |
 | `anthropic` | `ANTHROPIC_API_KEY` | Keyword index | Prompt caching reduces cost across a batch run |
 | `openai` | `OPENAI_API_KEY` | Vector + keyword | Embeddings via `text-embedding-3-small` |
 | `ollama` | Ollama running locally | Vector + keyword | Embeddings via `nomic-embed-text`; fully offline, no API key |
 
-RAG (Retrieval-Augmented Generation) is built automatically when the provider supports it. Each document group (pipeline + its linked artifacts) gets its own isolated index so context never crosses document boundaries. Providers that do not support embeddings (`anthropic`, `local`) use a keyword index for retrieval.
+RAG (Retrieval-Augmented Generation) is built automatically when the provider supports it. Each document group (pipeline + its linked artifacts) gets its own isolated index so context never crosses document boundaries. Providers that do not support embeddings (`anthropic`, `local`, `copilot`) use a keyword index for retrieval or skip it entirely.
+
+**Setting up the GitHub Copilot CLI provider:**
+
+```bash
+# 1. Install the GitHub CLI
+# https://cli.github.com
+
+# 2. Install the Copilot extension
+gh extension install github/gh-copilot
+
+# 3. Authenticate
+gh auth login
+
+# 4. Set the provider
+echo "LLM_PROVIDER=copilot" >> .env
+```
 
 ---
 
@@ -128,6 +145,18 @@ The **Purpose** section is enriched before the LLM call by searching linked work
 When relevant items are found, their titles and descriptions are prepended to the LLM prompt so the generated purpose reflects real business intent. When nothing is found, the artifact's own data flow is used as a fallback context to infer the purpose.
 
 Both backends are optional and independent — configure one, both, or neither.
+
+### Azure DevOps enrichment details
+
+The ADO enrichment runs a three-stage pipeline to maximise relevance:
+
+1. **PR-linked work items (primary)** — finds open and merged PRs whose title matches the artifact name, verifies that each PR actually modifies the artifact's files (using the ADO iterations API), then fetches every work item explicitly linked to those PRs — including titles, descriptions, and acceptance criteria. This is the richest signal when it is available.
+
+2. **Full-text search with LLM re-ranking (fallback)** — when no verified PR+WI pairs are found, queries the ADO Search REST API (`almsearch.dev.azure.com`) for up to 10 candidate work items matching the artifact name across all fields. The active LLM then filters the list to keep only items genuinely relevant to the artifact being documented.
+
+3. **WIQL keyword search (last resort)** — if the Search API is unavailable (e.g. on-premises ADO without the Search extension), falls back to a `CONTAINS WORDS` WIQL query against `System.Title`.
+
+Artifact names are normalised before every search — type prefixes (`pl_`, `nb_`, `df_`), version suffixes (`_v2`), and separators are stripped so a pipeline named `pl_load_customer_data` is searched as `load customer data`.
 
 ---
 
@@ -230,8 +259,8 @@ All settings are read from `.env`. See `.env.example` for the full list with com
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `LLM_PROVIDER` | `anthropic` | `anthropic`, `openai`, `ollama`, or `local` |
-| `LLM_MODEL` | provider default | Override the model name (`claude-sonnet-4-6` / `gpt-4o-mini` / `llama3.2`) |
+| `LLM_PROVIDER` | `anthropic` | `anthropic`, `openai`, `ollama`, `local`, or `copilot` |
+| `LLM_MODEL` | provider default | Override the model name (`claude-sonnet-4-6` / `gpt-4o-mini` / `llama3.2`); ignored for `local` and `copilot` |
 | `ANTHROPIC_API_KEY` | — | Required for `anthropic` |
 | `OPENAI_API_KEY` | — | Required for `openai` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Only for `ollama` |
@@ -281,7 +310,7 @@ Azure DevOps work items and PRs are searched automatically when `AZDO_ORG`, `AZD
 
 ```
 agent/
-  ai/               LLM clients — Anthropic, OpenAI, Ollama, local Claude CLI
+  ai/               LLM clients — Anthropic, OpenAI, Ollama, local Claude CLI, GitHub Copilot CLI
   enrichers/        Purpose enrichment — Jira and Azure DevOps ticket/PR lookup
   generators/       Document assembly — one LLM call per section, results joined
   parsers/          Source parsers — pipeline JSON, notebook .ipynb, Dataflow Gen2, Power Automate
@@ -297,7 +326,7 @@ agent/
   main.py           CLI entry point
 prompts.md          Per-section prompt templates (edit to customise output)
 samples/            Example source files and generated output
-tests/              pytest suite (361 tests)
+tests/              pytest suite (476 tests)
 ```
 
 ---
